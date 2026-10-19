@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#dcecf0" />
+    <title>kokopla — 10m × 10m</title>
+  </head>
+  <body>
+    <main id="scene" aria-label="10m四方の3D空間">
+      <div id="scene-canvas" aria-label="クリックして視点操作を開始。WASDで移動します。"></div>
+      <div class="reticle" aria-hidden="true"><span></span><i></i></div>
+      <div class="immersive-hud" aria-live="polite">
+        <strong>10m × 10m</strong>
+        <span id="immersive-status">クリックして視点操作</span>
+        <small id="movement-mode">歩行モード</small>
+        <small id="camera-mode">一人称視点</small>
+      </div>
+      <div class="room-toast" id="room-toast" aria-live="polite"></div>
+    </main>
+
+    <section class="multiplayer-panel" aria-label="マルチプレイ">
+      <span class="network-status" id="network-status">未接続</span>
+      <button id="create-room-button" type="button">ルーム作成</button>
+      <form id="join-room-form">
+        <input id="room-code-input" type="text" maxlength="8" autocomplete="off" placeholder="ルームコード" aria-label="ルームコード" />
+        <button type="submit">参加</button>
+      </form>
+      <div class="active-room" id="active-room" hidden>
+        <span id="active-room-label"></span>
+        <button id="copy-room-button" type="button">招待リンクをコピー</button>
+        <button id="leave-room-button" type="button">退出</button>
+      </div>
+    </section>
+
+    <div class="modal-backdrop username-backdrop" id="username-backdrop" hidden>
+      <form class="dialog-card username-card" id="username-form" role="dialog" aria-modal="true" aria-labelledby="username-title">
+        <h1 id="username-title">ユーザー名を設定</h1>
+        <label for="username-input">ユーザー名</label>
+        <input id="username-input" name="username" type="text" maxlength="16" autocomplete="nickname" required />
+        <button type="submit">開始</button>
+      </form>
+    </div>
+    <div class="toast" id="app-toast" role="status" aria-live="polite"></div>
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>
