@@ -6,13 +6,16 @@
   "scripts": {
     "dev": "vite --host 127.0.0.1",
     "build": "vite build",
-    "preview": "vite preview --host 127.0.0.1 --port 4173 --strictPort"
+    "preview": "vite preview --host 127.0.0.1 --port 4173 --strictPort",
+    "worker:dev": "npm run build && wrangler dev --port 8787",
+    "worker:deploy": "npm run build && wrangler deploy"
   },
   "dependencies": {
     "three": "^0.179.1",
     "ws": "^8.22.0"
   },
   "devDependencies": {
-    "vite": "^7.1.7"
+    "vite": "^7.1.7",
+    "wrangler": "^4.151.3"
   }
 }

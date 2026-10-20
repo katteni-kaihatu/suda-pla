@@ -16,6 +16,9 @@ const MAX_IP_CONNECTIONS = 32;
 const MAX_RATE_LIMIT_KEYS = 10_000;
 const TURN_CREDENTIAL_TTL_SECONDS = 10 * 60;
 const ICE_CONFIG_REQUESTS_PER_MINUTE = 20;
+const MAX_IPFS_UPLOAD_SIZE = 5 * 1024 * 1024;
+const IPFS_UPLOAD_URL_TTL_SECONDS = 60;
+const DEFAULT_IPFS_GATEWAYS = ['https://ipfs.io/ipfs/', 'https://dweb.link/ipfs/'];
 
 function readPositiveLimit(name, fallback, maximum) {
   const parsed = Number.parseInt(process.env[name] || '', 10);
@@ -173,6 +176,123 @@ function installIceConfigMiddleware(server, issueLimiter) {
   });
 }
 
+function getIpfsGateways() {
+  const values = (process.env.KOKOPLA_IPFS_GATEWAYS || DEFAULT_IPFS_GATEWAYS.join(','))
+    .split(',')
+    .map((gateway) => gateway.trim())
+    .filter(Boolean);
+  const gateways = [];
+  for (const value of values) {
+    try {
+      const url = new URL(value);
+      if (url.protocol !== 'https:' || url.username || url.password || url.search || url.hash) continue;
+      if (url.pathname !== '/' && !url.pathname.endsWith('/ipfs/')) continue;
+      const pathname = url.pathname === '/' ? '/ipfs/' : url.pathname;
+      const gateway = `${url.origin}${pathname}`;
+      if (!gateways.includes(gateway)) gateways.push(gateway);
+    } catch {
+      // Ignore invalid gateway entries and keep the remaining usable gateways.
+    }
+  }
+  return gateways.length ? gateways : DEFAULT_IPFS_GATEWAYS;
+}
+
+function installIpfsMiddleware(server, ticketLimiter, globalTicketLimiter) {
+  server.middlewares.use((request, response, next) => {
+    let pathname;
+    try {
+      pathname = new URL(request.url || '/', 'http://localhost').pathname;
+    } catch {
+      return next();
+    }
+    if (pathname !== '/ipfs-config' && pathname !== '/ipfs-upload-ticket') return next();
+    const sendJson = (status, value) => {
+      response.writeHead(status, {
+        'Content-Type': 'application/json; charset=utf-8',
+        'Cache-Control': 'no-store, max-age=0',
+        'X-Content-Type-Options': 'nosniff',
+      });
+      response.end(JSON.stringify(value));
+    };
+
+    if (pathname === '/ipfs-config') {
+      if (request.method !== 'GET') {
+        response.writeHead(405, { Allow: 'GET', 'Cache-Control': 'no-store' });
+        response.end();
+        return;
+      }
+      sendJson(200, {
+        enabled: Boolean(process.env.PINATA_JWT?.trim()),
+        maxFileSize: MAX_IPFS_UPLOAD_SIZE,
+        gateways: getIpfsGateways(),
+      });
+      return;
+    }
+
+    if (request.method !== 'POST') {
+      response.writeHead(405, { Allow: 'POST', 'Cache-Control': 'no-store' });
+      response.end();
+      return;
+    }
+    if (!isAllowedOrigin(request)) {
+      sendJson(403, { error: '同じサイトからのリクエストのみ利用できます。' });
+      return;
+    }
+    if (!process.env.PINATA_JWT?.trim()) {
+      sendJson(503, { error: 'IPFSアップロードが設定されていません。' });
+      return;
+    }
+    const clientKey = getClientKey(request);
+    if (!ticketLimiter(clientKey) || !globalTicketLimiter('all')) {
+      response.writeHead(429, {
+        'Content-Type': 'application/json; charset=utf-8',
+        'Cache-Control': 'no-store',
+        'Retry-After': '60',
+        'X-Content-Type-Options': 'nosniff',
+      });
+      response.end(JSON.stringify({ error: 'アップロード回数が上限に達しました。少し待ってから再試行してください。' }));
+      request.resume();
+      return;
+    }
+    request.resume();
+    void (async () => {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 5_000);
+      try {
+        const upstream = await fetch('https://uploads.pinata.cloud/v3/files/sign', {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${process.env.PINATA_JWT.trim()}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            date: Math.floor(Date.now() / 1000),
+            expires: IPFS_UPLOAD_URL_TTL_SECONDS,
+            max_file_size: MAX_IPFS_UPLOAD_SIZE,
+            cid_version: 'v1',
+          }),
+          signal: controller.signal,
+        });
+        const payload = await upstream.json().catch(() => null);
+        if (!upstream.ok || typeof payload?.data !== 'string') {
+          sendJson(502, { error: 'IPFSアップロードURLを発行できませんでした。' });
+          return;
+        }
+        const uploadUrl = new URL(payload.data);
+        if (uploadUrl.protocol !== 'https:' || uploadUrl.hostname !== 'uploads.pinata.cloud') {
+          sendJson(502, { error: 'IPFSアップロードURLが無効です。' });
+          return;
+        }
+        sendJson(200, { url: uploadUrl.toString() });
+      } catch {
+        sendJson(502, { error: 'IPFSサービスに接続できませんでした。' });
+      } finally {
+        clearTimeout(timeout);
+      }
+    })();
+  });
+}
+
 export function cloudflareMultiplayer() {
   const rooms = new Map();
   const attachedServers = new WeakSet();
@@ -180,6 +300,8 @@ export function cloudflareMultiplayer() {
   const restartLimiter = createRateLimiter(8, 60_000);
   const peerResetLimiter = createRateLimiter(1, 1_500);
   const iceConfigLimiter = createRateLimiter(ICE_CONFIG_REQUESTS_PER_MINUTE, 60_000);
+  const ipfsTicketLimiter = createRateLimiter(20, 60_000);
+  const ipfsGlobalTicketLimiter = createRateLimiter(120, 60 * 60_000, MAX_RATE_LIMIT_KEYS);
   const ipConnections = new Map();
 
   function attach(httpServer, rejectUnknownUpgrade = false) {
@@ -399,10 +521,12 @@ export function cloudflareMultiplayer() {
     name: 'kokopla-cloudflare-multiplayer',
     configureServer(server) {
       installIceConfigMiddleware(server, iceConfigLimiter);
+      installIpfsMiddleware(server, ipfsTicketLimiter, ipfsGlobalTicketLimiter);
       attach(server.httpServer, false);
     },
     configurePreviewServer(server) {
       installIceConfigMiddleware(server, iceConfigLimiter);
+      installIpfsMiddleware(server, ipfsTicketLimiter, ipfsGlobalTicketLimiter);
       attach(server.httpServer, true);
     },
   };

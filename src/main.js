@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import './style.css';
+import { createWorldItemSystem, WORLD_ITEMS_CHANNEL_LABEL } from './world-items.js';
 
 const $ = (selector) => document.querySelector(selector);
 const clamp = (value, min, max) => Math.max(min, Math.min(max, value));
@@ -253,6 +254,28 @@ function sceneToast(message) {
   sceneToast.timer = setTimeout(() => element.classList.remove('visible'), 1800);
 }
 
+const ipfsConfigurationPromise = fetch('/ipfs-config', { cache: 'no-store' })
+  .then((response) => response.ok ? response.json() : Promise.reject(new Error('IPFS設定を取得できませんでした。')))
+  .then((config) => ({
+    enabled: config.enabled === true,
+    gateways: Array.isArray(config.gateways) ? config.gateways : [],
+  }))
+  .catch(() => ({ enabled: false, gateways: [] }));
+void ipfsConfigurationPromise.then(({ enabled }) => {
+  $('#storage-status').textContent = enabled ? 'IPFS分散共有' : 'IPFS未設定 · P2P共有';
+});
+
+const worldItemSystem = createWorldItemSystem({
+  scene,
+  camera,
+  canvas: renderer.domElement,
+  getConnections: () => state.peerConnections,
+  getIpfsConfig: () => ipfsConfigurationPromise,
+  getPlayerPose: () => ({ x: state.position.x, y: state.position.y + 1.6, z: state.position.z, yaw: state.yaw }),
+  isRoomJoined: () => state.roomJoined,
+  toast,
+});
+
 function sendSignaling(message) {
   const socket = state.signalingSocket;
   if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify(message));
@@ -351,6 +374,7 @@ function closePeerConnection(id) {
   if (connection) {
     state.peerConnections.delete(id);
     clearTimeout(connection.restartTimer);
+    worldItemSystem.closeConnection(connection);
     connection.pc.close();
   }
   removeRemoteAvatar(id);
@@ -376,11 +400,14 @@ function startPeerConnection(peer, shouldOffer) {
     }
   };
   pc.ondatachannel = (event) => {
-    if (state.peerConnections.get(peer.id) !== connection || event.channel.label !== 'player-state') {
+    if (state.peerConnections.get(peer.id) !== connection) {
       event.channel.close();
       return;
     }
-    attachDataChannel(peer.id, connection, event.channel);
+    if (event.channel.label === 'player-state') attachDataChannel(peer.id, connection, event.channel);
+    else if (event.channel.label === WORLD_ITEMS_CHANNEL_LABEL) {
+      worldItemSystem.attachChannel(peer.id, connection, event.channel);
+    } else event.channel.close();
   };
   pc.onconnectionstatechange = () => {
     if (state.peerConnections.get(peer.id) !== connection) return;
@@ -411,6 +438,8 @@ function startPeerConnection(peer, shouldOffer) {
   if (shouldOffer) {
     const channel = pc.createDataChannel('player-state', { ordered: false, maxRetransmits: 0 });
     attachDataChannel(peer.id, connection, channel);
+    const worldItemsChannel = pc.createDataChannel(WORLD_ITEMS_CHANNEL_LABEL);
+    worldItemSystem.attachChannel(peer.id, connection, worldItemsChannel);
     void (async () => {
       try {
         const offer = await pc.createOffer();
@@ -613,6 +642,7 @@ function leaveRoom(showMessage = true) {
   socket?.close();
   for (const id of [...state.peerConnections.keys()]) closePeerConnection(id);
   for (const id of [...state.remoteAvatars.keys()]) removeRemoteAvatar(id);
+  worldItemSystem.clear();
   const url = new URL(location.href);
   url.searchParams.delete('room');
   history.replaceState(null, '', url);
@@ -829,8 +859,10 @@ function animate(now) {
   if (state.cameraMode === 'third') camera.position.set(state.position.x, eyeHeight, state.position.z).addScaledVector(viewDirection, -3.2);
   else camera.position.set(state.position.x, eyeHeight, state.position.z);
   camera.rotation.set(state.pitch, state.yaw, 0);
+  camera.updateMatrixWorld(true);
   lookGizmo.position.set(state.position.x, state.position.y + 1.7, state.position.z);
   lookGizmo.quaternion.copy(camera.quaternion);
+  worldItemSystem.update(now);
   if (now - state.lastNetworkUpdate >= 50) {
     sendPlayerState();
     state.lastNetworkUpdate = now;

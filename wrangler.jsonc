@@ -1,0 +1,25 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "kokopla-alp",
+  "main": "./worker/index.js",
+  "compatibility_date": "2026-10-20",
+  "assets": {
+    "directory": "./dist",
+    "binding": "ASSETS",
+    "not_found_handling": "single-page-application",
+    "run_worker_first": [
+      "/signal",
+      "/ice-config",
+      "/ipfs-config",
+      "/ipfs-upload-ticket"
+    ]
+  },
+  "durable_objects": {
+    "bindings": [
+      { "name": "ROOM_HUB", "class_name": "RoomHub" }
+    ]
+  },
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["RoomHub"] }
+  ]
+}
