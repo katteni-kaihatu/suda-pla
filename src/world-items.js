@@ -11,6 +11,10 @@ const TRANSFER_TIMEOUT_MS = 30_000;
 const IPFS_FETCH_TIMEOUT_MS = 9_000;
 const CARD_SIZE = 1.25;
 const IMAGE_WORLD_SIZE = 1.5;
+const MIN_GRAB_DISTANCE = 0.2;
+const MAX_GRAB_DISTANCE = 30;
+const MIN_ITEM_SCALE = 0.15;
+const MAX_ITEM_SCALE = 5;
 const UUID_PATTERN = /^[\da-f-]{36}$/i;
 const CID_V1_PATTERN = /^b[a-z2-7]{20,100}$/;
 
@@ -32,6 +36,36 @@ function cleanMimeType(value) {
 
 function wrapAngle(value) {
   return Math.atan2(Math.sin(value), Math.cos(value));
+}
+
+function validTransform(message) {
+  const values = [message.qx, message.qy, message.qz, message.qw];
+  const hasRotation = values.some((value) => value !== undefined);
+  const lengthSquared = values.reduce((sum, value) => sum + value * value, 0);
+  return (!hasRotation || (values.every(Number.isFinite) && lengthSquared > 0.01 && lengthSquared < 100))
+    && (message.scale === undefined || (Number.isFinite(message.scale)
+      && message.scale >= MIN_ITEM_SCALE && message.scale <= MAX_ITEM_SCALE));
+}
+
+function itemRotation(message) {
+  if (message.qx !== undefined) {
+    return new THREE.Quaternion(message.qx, message.qy, message.qz, message.qw).normalize();
+  }
+  return new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), message.yaw);
+}
+
+function poseFields(item) {
+  return {
+    x: item.x,
+    y: item.y,
+    z: item.z,
+    yaw: item.yaw,
+    qx: item.rotation.x,
+    qy: item.rotation.y,
+    qz: item.rotation.z,
+    qw: item.rotation.w,
+    scale: item.scale,
+  };
 }
 
 function bytesToBase64(bytes) {
@@ -148,12 +182,18 @@ export function createWorldItemSystem({ scene, camera, canvas, getConnections, g
   const viewDirection = new THREE.Vector3();
   const viewRight = new THREE.Vector3();
   const playerEye = new THREE.Vector3();
+  const grabOffset = new THREE.Vector3();
+  const grabRotation = new THREE.Quaternion();
+  const grabWorldRotation = new THREE.Quaternion();
+  const rotationStep = new THREE.Quaternion();
+  const rotationEuler = new THREE.Euler(0, 0, 0, 'YXZ');
   const dropHint = document.querySelector('#drop-hint');
   let totalBytes = 0;
   let pendingBytes = 0;
   let dropDepth = 0;
   let dropQueue = Promise.resolve();
   let grabbedItem = null;
+  let rotateHeld = false;
   let lastPositionBroadcast = 0;
   const gatewaySeed = Math.floor(Math.random() * 2 ** 32);
   let gatewayCursor = 0;
@@ -174,6 +214,8 @@ export function createWorldItemSystem({ scene, camera, canvas, getConnections, g
 
   function clear() {
     grabbedItem = null;
+    rotateHeld = false;
+    document.body.classList.remove('item-grabbed');
     for (const itemId of [...pendingItems.keys()]) discardPending(itemId);
     for (const item of items.values()) {
       if (!item.mesh) continue;
@@ -190,6 +232,8 @@ export function createWorldItemSystem({ scene, camera, canvas, getConnections, g
     if (items.has(item.id) || items.size + pendingItems.size >= MAX_ITEM_COUNT
       || totalBytes + pendingBytes + item.size > MAX_TOTAL_BYTES) return false;
     totalBytes += item.size;
+    item.rotation ||= itemRotation(item);
+    item.scale ??= 1;
     items.set(item.id, item);
     void createItemCanvas(item).then((card) => {
       if (items.get(item.id) !== item) return;
@@ -205,7 +249,8 @@ export function createWorldItemSystem({ scene, camera, canvas, getConnections, g
       });
       const mesh = new THREE.Mesh(new THREE.PlaneGeometry(card.width, card.height), material);
       mesh.position.set(item.x, item.y, item.z);
-      mesh.rotation.y = item.yaw;
+      mesh.quaternion.copy(item.rotation);
+      mesh.scale.setScalar(item.scale);
       mesh.userData.worldItemId = item.id;
       scene.add(mesh);
       item.mesh = mesh;
@@ -224,10 +269,7 @@ export function createWorldItemSystem({ scene, camera, canvas, getConnections, g
         mimeType: item.mimeType,
         size: item.size,
         cid: item.cid,
-        x: item.x,
-        y: item.y,
-        z: item.z,
-        yaw: item.yaw,
+        ...poseFields(item),
       }));
       return;
     }
@@ -238,10 +280,7 @@ export function createWorldItemSystem({ scene, camera, canvas, getConnections, g
       name: item.name,
       mimeType: item.mimeType,
       size: item.size,
-      x: item.x,
-      y: item.y,
-      z: item.z,
-      yaw: item.yaw,
+      ...poseFields(item),
       chunkCount,
     }));
     for (let index = 0; index < chunkCount; index += 1) {
@@ -267,6 +306,8 @@ export function createWorldItemSystem({ scene, camera, canvas, getConnections, g
       y: pending.y,
       z: pending.z,
       yaw: pending.yaw,
+      rotation: pending.rotation,
+      scale: pending.scale,
       bytes: pending.bytes,
     };
     if (!addItem(item)) return;
@@ -275,14 +316,17 @@ export function createWorldItemSystem({ scene, camera, canvas, getConnections, g
     }
   }
 
-  function setItemPose(item, x, y, z, yaw) {
+  function setItemPose(item, x, y, z, rotation, scale) {
     item.x = x;
     item.y = y;
     item.z = z;
-    item.yaw = yaw;
+    item.rotation.copy(rotation);
+    item.yaw = wrapAngle(rotationEuler.setFromQuaternion(rotation).y);
+    item.scale = scale;
     item.mesh?.position.set(x, y, z);
     if (item.mesh) {
-      item.mesh.rotation.y = yaw;
+      item.mesh.quaternion.copy(rotation);
+      item.mesh.scale.setScalar(scale);
       item.mesh.updateMatrixWorld(true);
     }
   }
@@ -291,10 +335,7 @@ export function createWorldItemSystem({ scene, camera, canvas, getConnections, g
     const message = JSON.stringify({
       type: 'world-item-position',
       id: item.id,
-      x: item.x,
-      y: item.y,
-      z: item.z,
-      yaw: item.yaw,
+      ...poseFields(item),
     });
     for (const connection of getConnections().values()) {
       const channel = connection.worldItemsChannel;
@@ -303,10 +344,20 @@ export function createWorldItemSystem({ scene, camera, canvas, getConnections, g
   }
 
   function handlePosition(message) {
-    const item = items.get(message.id);
-    if (!item || ![message.x, message.y, message.z, message.yaw].every(Number.isFinite)) return;
+    const item = items.get(message.id) || pendingItems.get(message.id);
+    if (!item || ![message.x, message.y, message.z, message.yaw].every(Number.isFinite)
+      || !validTransform(message)) return;
     if ([message.x, message.y, message.z].some((value) => Math.abs(value) > 100)) return;
-    setItemPose(item, message.x, message.y, message.z, wrapAngle(message.yaw));
+    if (pendingItems.get(message.id) === item) {
+      item.x = message.x;
+      item.y = message.y;
+      item.z = message.z;
+      item.yaw = wrapAngle(message.yaw);
+      item.rotation = itemRotation(message);
+      item.scale = message.scale ?? 1;
+      return;
+    }
+    setItemPose(item, message.x, message.y, message.z, itemRotation(message), message.scale ?? 1);
   }
 
   function handleStart(connection, message) {
@@ -316,6 +367,7 @@ export function createWorldItemSystem({ scene, camera, canvas, getConnections, g
       || !Number.isSafeInteger(message.size) || message.size < 0 || message.size > MAX_FILE_SIZE
       || !Number.isInteger(message.chunkCount) || message.chunkCount !== Math.ceil(message.size / CHUNK_SIZE)
       || ![message.x, message.y, message.z, message.yaw].every(Number.isFinite)
+      || !validTransform(message)
       || [message.x, message.y, message.z].some((value) => Math.abs(value) > 100)) return;
     if (items.size + pendingItems.size >= MAX_ITEM_COUNT
       || totalBytes + pendingBytes + message.size > MAX_TOTAL_BYTES) return;
@@ -329,6 +381,8 @@ export function createWorldItemSystem({ scene, camera, canvas, getConnections, g
       y: message.y,
       z: message.z,
       yaw: wrapAngle(message.yaw),
+      rotation: itemRotation(message),
+      scale: message.scale ?? 1,
       bytes: new Uint8Array(message.size),
       nextChunk: 0,
       connection,
@@ -401,6 +455,7 @@ export function createWorldItemSystem({ scene, camera, canvas, getConnections, g
       || typeof message.cid !== 'string' || !CID_V1_PATTERN.test(message.cid)
       || !Number.isSafeInteger(message.size) || message.size < 0 || message.size > MAX_FILE_SIZE
       || ![message.x, message.y, message.z, message.yaw].every(Number.isFinite)
+      || !validTransform(message)
       || [message.x, message.y, message.z].some((value) => Math.abs(value) > 100)) return;
     if (items.size + pendingItems.size >= MAX_ITEM_COUNT
       || totalBytes + pendingBytes + message.size > MAX_TOTAL_BYTES) return;
@@ -415,6 +470,8 @@ export function createWorldItemSystem({ scene, camera, canvas, getConnections, g
       y: message.y,
       z: message.z,
       yaw: wrapAngle(message.yaw),
+      rotation: itemRotation(message),
+      scale: message.scale ?? 1,
       bytes: null,
       connection,
       timeout: setTimeout(() => discardPending(message.id), TRANSFER_TIMEOUT_MS),
@@ -449,10 +506,7 @@ export function createWorldItemSystem({ scene, camera, canvas, getConnections, g
       name: item.name,
       mimeType: item.mimeType,
       size: item.size,
-      x: item.x,
-      y: item.y,
-      z: item.z,
-      yaw: item.yaw,
+      ...poseFields(item),
       chunkCount,
     }));
     for (let index = 0; index < chunkCount; index += 1) {
@@ -680,12 +734,22 @@ export function createWorldItemSystem({ scene, camera, canvas, getConnections, g
     if (event.button !== 2) return;
     event.preventDefault();
     grabbedItem = pickItem(event) || null;
+    document.body.classList.toggle('item-grabbed', Boolean(grabbedItem));
+    if (!grabbedItem) return;
+    getViewAnchor();
+    grabWorldRotation.copy(camera.quaternion).invert();
+    grabOffset.set(grabbedItem.x, grabbedItem.y, grabbedItem.z)
+      .sub(playerEye).applyQuaternion(grabWorldRotation);
+    if (grabOffset.lengthSq() < 0.0001) grabOffset.set(0, 0, -MIN_GRAB_DISTANCE);
+    grabRotation.copy(grabWorldRotation).multiply(grabbedItem.rotation);
   }
 
   function onMouseUp(event) {
     if (event.button !== 2 || !grabbedItem) return;
     const releasedItem = grabbedItem;
     grabbedItem = null;
+    rotateHeld = false;
+    document.body.classList.remove('item-grabbed');
     broadcastPosition(releasedItem);
   }
 
@@ -697,14 +761,55 @@ export function createWorldItemSystem({ scene, camera, canvas, getConnections, g
     if (!grabbedItem) return;
     const releasedItem = grabbedItem;
     grabbedItem = null;
+    rotateHeld = false;
+    document.body.classList.remove('item-grabbed');
     broadcastPosition(releasedItem);
+  }
+
+  function onWheel(event) {
+    if (!grabbedItem) return;
+    event.preventDefault();
+    const unit = event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? window.innerHeight : 1;
+    const delta = THREE.MathUtils.clamp(event.deltaY * unit, -500, 500);
+    if (event.shiftKey) {
+      grabbedItem.scale = THREE.MathUtils.clamp(
+        grabbedItem.scale * Math.exp(-delta * 0.001), MIN_ITEM_SCALE, MAX_ITEM_SCALE,
+      );
+    } else {
+      const distance = THREE.MathUtils.clamp(
+        grabOffset.length() * Math.exp(delta * 0.001), MIN_GRAB_DISTANCE, MAX_GRAB_DISTANCE,
+      );
+      grabOffset.setLength(distance);
+    }
+    update(performance.now());
+  }
+
+  function rotateGrabbed(movementX, movementY) {
+    if (!grabbedItem || !rotateHeld || document.pointerLockElement !== canvas) return false;
+    rotationStep.setFromEuler(rotationEuler.set(-movementY * 0.005, -movementX * 0.005, 0));
+    grabRotation.premultiply(rotationStep).normalize();
+    update(performance.now());
+    return true;
+  }
+
+  function onKeyDown(event) {
+    if (event.key.toLowerCase() !== 'e' || !grabbedItem
+      || document.pointerLockElement !== canvas) return;
+    event.preventDefault();
+    rotateHeld = true;
+  }
+
+  function onKeyUp(event) {
+    if (event.key.toLowerCase() === 'e') rotateHeld = false;
   }
 
   function update(now) {
     if (!grabbedItem || items.get(grabbedItem.id) !== grabbedItem) return;
-    const pose = getViewAnchor();
-    worldPoint.copy(playerEye).addScaledVector(viewDirection, 1);
-    setItemPose(grabbedItem, worldPoint.x, worldPoint.y, worldPoint.z, pose.yaw);
+    getViewAnchor();
+    worldPoint.copy(grabOffset).applyQuaternion(camera.quaternion).add(playerEye);
+    grabWorldRotation.copy(camera.quaternion).multiply(grabRotation);
+    setItemPose(grabbedItem, worldPoint.x, worldPoint.y, worldPoint.z,
+      grabWorldRotation, grabbedItem.scale);
     if (now - lastPositionBroadcast >= 50) {
       broadcastPosition(grabbedItem);
       lastPositionBroadcast = now;
@@ -716,8 +821,11 @@ export function createWorldItemSystem({ scene, camera, canvas, getConnections, g
   document.addEventListener('dragleave', onDragLeave);
   document.addEventListener('drop', onDrop);
   canvas.addEventListener('mousedown', onMouseDown);
+  canvas.addEventListener('wheel', onWheel, { passive: false });
   canvas.addEventListener('contextmenu', onContextMenu);
   document.addEventListener('mouseup', onMouseUp);
+  document.addEventListener('keydown', onKeyDown);
+  document.addEventListener('keyup', onKeyUp);
   window.addEventListener('blur', releaseGrab);
 
   return {
@@ -725,5 +833,6 @@ export function createWorldItemSystem({ scene, camera, canvas, getConnections, g
     closeConnection: discardConnectionTransfers,
     clear,
     update,
+    rotateGrabbed,
   };
 }

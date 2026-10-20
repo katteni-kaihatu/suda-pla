@@ -759,6 +759,7 @@ canvas.addEventListener('auxclick', (event) => {
 });
 document.addEventListener('mousemove', (event) => {
   if (document.pointerLockElement !== canvas) return;
+  if (worldItemSystem.rotateGrabbed(event.movementX, event.movementY)) return;
   state.yaw = wrapAngle(state.yaw - event.movementX * 0.0022);
   state.pitch = clamp(state.pitch - event.movementY * 0.0022, -Math.PI / 2, Math.PI / 2);
 });

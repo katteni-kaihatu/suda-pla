@@ -16,6 +16,8 @@ button:focus-visible, input:focus-visible { outline: 2px solid #789f80; outline-
 
 #scene, #scene-canvas { position: absolute; inset: 0; width: 100%; height: 100%; }
 #scene { overflow: hidden; background: #dcecf0; }
+#scene::after { position: absolute; z-index: 7; inset: 0; border: 5px solid #a8ecf4; box-shadow: inset 0 0 20px #b8f3f766; content: ''; opacity: 0; pointer-events: none; transition: opacity .15s; }
+body.item-grabbed #scene::after { opacity: 1; }
 #scene-canvas { touch-action: none; cursor: grab; }
 #scene-canvas:active { cursor: grabbing; }
 #scene-canvas canvas { display: block; width: 100%; height: 100%; }
@@ -26,7 +28,7 @@ body.cursor-locked, body.cursor-locked #scene-canvas { cursor: none; }
 .reticle span { top: 0; left: 6px; width: 2px; height: 14px; }
 .reticle i { top: 6px; left: 0; width: 14px; height: 2px; }
 
-.immersive-hud { position: absolute; z-index: 3; top: 16px; left: 16px; display: flex; flex-direction: column; gap: 5px; padding: 10px 13px; border: 1px solid #ffffff85; border-radius: 9px; background: #ffffffc9; color: #65786b; font-size: 11px; pointer-events: none; backdrop-filter: blur(8px); }
+.immersive-hud { position: absolute; z-index: 3; top: 16px; left: 16px; display: flex; flex-direction: column; gap: 5px; max-width: min(320px, calc(100vw - 32px)); padding: 10px 13px; border: 1px solid #ffffff85; border-radius: 9px; background: #ffffffc9; color: #65786b; font-size: 11px; pointer-events: none; backdrop-filter: blur(8px); }
 .immersive-hud strong { font-size: 12px; letter-spacing: .04em; }
 .immersive-hud span, .immersive-hud small { color: #8e9d92; font-size: 10px; }
 .drop-hint { position: fixed; z-index: 6; inset: 50% auto auto 50%; display: flex; flex-direction: column; gap: 7px; width: min(420px, calc(100vw - 40px)); padding: 18px 20px; transform: translate(-50%, -50%); border: 2px dashed #779580; border-radius: 14px; background: #fffefaed; color: #526b58; text-align: center; box-shadow: 0 8px 28px #34434422; pointer-events: none; }
