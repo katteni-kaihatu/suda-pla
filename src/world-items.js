@@ -338,8 +338,8 @@ export function createWorldItemSystem({ scene, camera, canvas, getConnections, g
             return step(0.06, texture2D(itemTexture, point).a);
           }
           void main() {
-            vec2 pixelX = dFdx(itemUv);
-            vec2 pixelY = dFdy(itemUv);
+            vec2 pixelX = dFdx(itemUv) * 3.0;
+            vec2 pixelY = dFdy(itemUv) * 3.0;
             float center = shapeAt(itemUv);
             float edge = max(
               max(abs(center - shapeAt(itemUv + pixelX)), abs(center - shapeAt(itemUv - pixelX))),
