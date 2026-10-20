@@ -2,7 +2,7 @@
 
 ブラウザーで遊べる10m × 10mの軽量な3D空間です。Three.jsで空間を描画し、位置と視点はWebRTC DataChannelで参加者間に直接送ります。WebSocketはルーム参加と接続交渉にだけ使います。
 
-公開URL: https://kokopla-alp.kokopla-virtual-plaza.workers.dev/
+公開URL: https://kokopla-alp.gspe.workers.dev/
 
 ## ローカルで起動
 
