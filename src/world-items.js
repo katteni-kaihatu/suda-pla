@@ -770,7 +770,8 @@ export function createWorldItemSystem({ scene, camera, canvas, getConnections, g
     if (!grabbedItem) return;
     event.preventDefault();
     const unit = event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? window.innerHeight : 1;
-    const delta = THREE.MathUtils.clamp(event.deltaY * unit, -500, 500);
+    const wheelDelta = event.shiftKey && !event.deltaY ? event.deltaX : event.deltaY;
+    const delta = THREE.MathUtils.clamp(wheelDelta * unit, -500, 500);
     if (event.shiftKey) {
       grabbedItem.scale = THREE.MathUtils.clamp(
         grabbedItem.scale * Math.exp(-delta * 0.001), MIN_ITEM_SCALE, MAX_ITEM_SCALE,
