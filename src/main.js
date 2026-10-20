@@ -4,8 +4,41 @@ import './style.css';
 const $ = (selector) => document.querySelector(selector);
 const clamp = (value, min, max) => Math.max(min, Math.min(max, value));
 const COLORS = ['#f2ad78', '#86c3b2', '#f19a9a', '#a997df', '#e6c35f', '#78aeda', '#ed91b9', '#94be70'];
+const DEFAULT_ICE_SERVERS = [{ urls: 'stun:stun.l.google.com:19302' }];
+const DEFAULT_ICE_CONFIGURATION = { iceServers: DEFAULT_ICE_SERVERS, iceTransportPolicy: 'all' };
+const ROOM_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+
+function cleanPlayerName(value) {
+  if (typeof value !== 'string') return '';
+  return Array.from(value.normalize('NFKC').replace(/[\u0000-\u001f\u007f-\u009f]/g, ' ').replace(/\s+/g, ' ').trim())
+    .slice(0, 16)
+    .join('');
+}
+
+function readSavedName() {
+  try {
+    return cleanPlayerName(localStorage.getItem('kokopla-name') || '');
+  } catch {
+    return '';
+  }
+}
+
+function wrapAngle(value) {
+  return Math.atan2(Math.sin(value), Math.cos(value));
+}
+
+function cleanPeer(value) {
+  if (!value || typeof value !== 'object' || typeof value.id !== 'string'
+    || !/^[\da-f-]{36}$/i.test(value.id)) return null;
+  return {
+    id: value.id,
+    name: cleanPlayerName(value.name) || 'Guest',
+    color: typeof value.color === 'string' && /^#[0-9a-f]{6}$/i.test(value.color) ? value.color : COLORS[0],
+  };
+}
+
 const state = {
-  name: localStorage.getItem('kokopla-name')?.trim() || '',
+  name: readSavedName(),
   color: COLORS[Math.floor(Math.random() * COLORS.length)],
   position: { x: 0, y: 0, z: 3.6 },
   yaw: 0,
@@ -17,7 +50,11 @@ const state = {
   pressed: new Set(),
   playerId: null,
   roomCode: null,
+  roomJoined: false,
+  roomAttempt: 0,
   signalingSocket: null,
+  iceServers: DEFAULT_ICE_SERVERS,
+  iceTransportPolicy: 'all',
   peerConnections: new Map(),
   remoteAvatars: new Map(),
   lastNetworkUpdate: 0,
@@ -82,6 +119,8 @@ avatar.add(body);
 let nameTag;
 
 function makeNameTag(name, color = state.color) {
+  const labelName = cleanPlayerName(name) || 'ユーザー';
+  const labelColor = /^#[0-9a-f]{6}$/i.test(String(color)) ? color : COLORS[0];
   const labelCanvas = document.createElement('canvas');
   labelCanvas.width = 420;
   labelCanvas.height = 80;
@@ -90,7 +129,7 @@ function makeNameTag(name, color = state.color) {
   context.beginPath();
   context.roundRect(12, 9, 396, 58, 24);
   context.fill();
-  context.fillStyle = color;
+  context.fillStyle = labelColor;
   context.beginPath();
   context.arc(37, 38, 7, 0, Math.PI * 2);
   context.fill();
@@ -98,7 +137,7 @@ function makeNameTag(name, color = state.color) {
   context.font = '600 22px "Yu Gothic UI", sans-serif';
   context.textAlign = 'center';
   context.textBaseline = 'middle';
-  context.fillText(name.slice(0, 16), 220, 39);
+  context.fillText(labelName, 220, 39);
   const texture = new THREE.CanvasTexture(labelCanvas);
   texture.colorSpace = THREE.SRGBColorSpace;
   const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: texture, transparent: true, depthWrite: false }));
@@ -155,22 +194,26 @@ function createRemoteAvatar(player) {
 }
 
 function updateRemoteAvatar(player) {
+  if (!player || typeof player.id !== 'string') return null;
+  const name = cleanPlayerName(player.name) || 'Guest';
+  const color = /^#[0-9a-f]{6}$/i.test(String(player.color)) ? player.color : COLORS[0];
   let remote = state.remoteAvatars.get(player.id);
-  if (!remote) remote = createRemoteAvatar(player);
-  if (remote.name !== player.name) {
+  if (!remote) remote = createRemoteAvatar({ ...player, name, color });
+  if (remote.name !== name) {
     remote.root.remove(remote.label);
     remote.label.material.map?.dispose();
     remote.label.material.dispose();
-    remote.label = makeNameTag(player.name, player.color);
+    remote.label = makeNameTag(name, color);
     remote.root.add(remote.label);
-    remote.name = player.name;
+    remote.name = name;
   }
-  remote.bodyMaterial.color.set(player.color);
+  remote.bodyMaterial.color.set(color);
   remote.target.x = Number.isFinite(player.x) ? player.x : 0;
   remote.target.y = Number.isFinite(player.y) ? player.y : 0;
   remote.target.z = Number.isFinite(player.z) ? player.z : 0;
   remote.target.yaw = Number.isFinite(player.yaw) ? player.yaw : 0;
   remote.target.pitch = Number.isFinite(player.pitch) ? clamp(player.pitch, -Math.PI / 2, Math.PI / 2) : 0;
+  return remote;
 }
 
 function removeRemoteAvatar(playerId) {
@@ -221,13 +264,18 @@ function updateRoomUi() {
   $('#create-room-button').hidden = active;
   $('#join-room-form').hidden = active;
   $('#active-room').hidden = !active;
-  $('#active-room-label').textContent = active ? `ルーム ${state.roomCode} · ${connectedPeers + 1}人` : '';
+  $('#copy-room-button').disabled = !state.roomJoined;
+  $('#active-room-label').textContent = active
+    ? state.roomJoined ? `ルーム ${state.roomCode} · ${state.peerConnections.size + 1}人` : `ルーム ${state.roomCode} に接続中`
+    : '';
   if (!active) {
     $('#network-status').textContent = '未接続';
-  } else if (state.signalingSocket?.readyState === WebSocket.CONNECTING) {
+  } else if (!state.roomJoined || state.signalingSocket?.readyState !== WebSocket.OPEN) {
     $('#network-status').textContent = `ルーム ${state.roomCode} に接続中`;
   } else if (connectedPeers) {
     $('#network-status').textContent = `P2P接続中 · ${connectedPeers + 1}人`;
+  } else if (state.peerConnections.size) {
+    $('#network-status').textContent = `P2P接続を確立中 · ${state.peerConnections.size + 1}人`;
   } else {
     $('#network-status').textContent = `ルーム ${state.roomCode} · 参加者を待っています`;
   }
@@ -236,8 +284,6 @@ function updateRoomUi() {
 function sendPlayerState() {
   const message = JSON.stringify({
     type: 'player-state',
-    name: state.name,
-    color: state.color,
     x: state.position.x,
     y: state.position.y,
     z: state.position.z,
@@ -246,48 +292,65 @@ function sendPlayerState() {
   });
   for (const connection of state.peerConnections.values()) {
     const channel = connection.channel;
-    if (channel?.readyState === 'open' && channel.bufferedAmount < 64 * 1024) channel.send(message);
+    if (channel?.readyState === 'open' && channel.bufferedAmount < 16 * 1024) channel.send(message);
   }
 }
 
 function updateFromPeer(id, rawMessage) {
+  if (typeof rawMessage !== 'string' || rawMessage.length > 1_024) return;
+  const remote = state.remoteAvatars.get(id);
+  if (!remote) return;
   let message;
   try {
     message = JSON.parse(rawMessage);
   } catch {
     return;
   }
-  if (message.type !== 'player-state') return;
-  const name = String(message.name || 'Guest').slice(0, 16);
-  const color = /^#[0-9a-f]{6}$/i.test(String(message.color)) ? message.color : COLORS[0];
+  if (!message || typeof message !== 'object' || Array.isArray(message) || message.type !== 'player-state') return;
   const bounded = (value) => Number.isFinite(value) ? clamp(value, -100, 100) : 0;
-  updateRemoteAvatar({
-    id,
-    name,
-    color,
-    x: bounded(message.x),
-    y: bounded(message.y),
-    z: bounded(message.z),
-    yaw: Number.isFinite(message.yaw) ? message.yaw : 0,
-    pitch: Number.isFinite(message.pitch) ? message.pitch : 0,
-  });
+  remote.target.x = bounded(message.x);
+  remote.target.y = bounded(message.y);
+  remote.target.z = bounded(message.z);
+  remote.target.yaw = Number.isFinite(message.yaw) ? wrapAngle(message.yaw) : 0;
+  remote.target.pitch = Number.isFinite(message.pitch) ? clamp(message.pitch, -Math.PI / 2, Math.PI / 2) : 0;
 }
 
 function attachDataChannel(id, connection, channel) {
+  if (state.peerConnections.get(id) !== connection) {
+    channel.close();
+    return;
+  }
+  if (connection.channel && connection.channel !== channel && connection.channel.readyState !== 'closed') {
+    channel.close();
+    return;
+  }
   connection.channel = channel;
   channel.onopen = () => {
+    if (state.peerConnections.get(id) !== connection) return;
     updateRoomUi();
     sendPlayerState();
   };
-  channel.onmessage = (event) => updateFromPeer(id, event.data);
-  channel.onclose = updateRoomUi;
-  channel.onerror = () => toast('P2P通信が不安定です。');
+  connection.lastStateReceived = 0;
+  channel.onmessage = (event) => {
+    if (state.peerConnections.get(id) !== connection) return;
+    const now = performance.now();
+    if (now - connection.lastStateReceived < 20) return;
+    connection.lastStateReceived = now;
+    updateFromPeer(id, event.data);
+  };
+  channel.onclose = () => {
+    if (state.peerConnections.get(id) === connection) updateRoomUi();
+  };
+  channel.onerror = () => {
+    if (state.peerConnections.get(id) === connection) toast('P2P通信が不安定です。');
+  };
 }
 
 function closePeerConnection(id) {
   const connection = state.peerConnections.get(id);
   if (connection) {
     state.peerConnections.delete(id);
+    clearTimeout(connection.restartTimer);
     connection.pc.close();
   }
   removeRemoteAvatar(id);
@@ -297,54 +360,167 @@ function closePeerConnection(id) {
 function startPeerConnection(peer, shouldOffer) {
   if (!peer?.id || state.peerConnections.has(peer.id)) return state.peerConnections.get(peer?.id);
   updateRemoteAvatar({ id: peer.id, name: peer.name, color: peer.color, x: 0, y: 0, z: 0, yaw: 0, pitch: 0 });
-  const pc = new RTCPeerConnection({
-    iceServers: [{ urls: 'stun:stun.l.google.com:19302' }],
-  });
-  const connection = { pc, channel: null, pendingCandidates: [] };
+  let pc;
+  try {
+    pc = new RTCPeerConnection({ iceServers: state.iceServers, iceTransportPolicy: state.iceTransportPolicy });
+  } catch {
+    removeRemoteAvatar(peer.id);
+    toast('このブラウザーではP2P通信を開始できません。');
+    return null;
+  }
+  const connection = { pc, channel: null, pendingCandidates: [], shouldOffer, restartTimer: null, restartAttempts: 0 };
   state.peerConnections.set(peer.id, connection);
   pc.onicecandidate = (event) => {
-    if (event.candidate) sendSignaling({ type: 'signal', to: peer.id, signal: { candidate: event.candidate } });
+    if (state.peerConnections.get(peer.id) === connection && event.candidate) {
+      sendSignaling({ type: 'signal', to: peer.id, signal: { candidate: event.candidate } });
+    }
   };
-  pc.ondatachannel = (event) => attachDataChannel(peer.id, connection, event.channel);
+  pc.ondatachannel = (event) => {
+    if (state.peerConnections.get(peer.id) !== connection || event.channel.label !== 'player-state') {
+      event.channel.close();
+      return;
+    }
+    attachDataChannel(peer.id, connection, event.channel);
+  };
   pc.onconnectionstatechange = () => {
-    if (['failed', 'closed'].includes(pc.connectionState)) closePeerConnection(peer.id);
+    if (state.peerConnections.get(peer.id) !== connection) return;
+    updateRoomUi();
+    if (pc.connectionState === 'connected') {
+      clearTimeout(connection.restartTimer);
+      connection.restartTimer = null;
+      return;
+    }
+    if (pc.connectionState === 'closed') {
+      closePeerConnection(peer.id);
+      return;
+    }
+    if (connection.shouldOffer && ['failed', 'disconnected'].includes(pc.connectionState) && !connection.restartTimer) {
+      const delay = pc.connectionState === 'failed' ? 750 : 3_000;
+      connection.restartTimer = setTimeout(async () => {
+        connection.restartTimer = null;
+        if (state.peerConnections.get(peer.id) !== connection || pc.connectionState === 'connected'
+          || !['failed', 'disconnected'].includes(pc.connectionState)
+          || state.signalingSocket?.readyState !== WebSocket.OPEN) return;
+        connection.restartAttempts += 1;
+        sendSignaling({ type: 'restart-peer', to: peer.id });
+        toast(`P2P接続を再試行しています (${connection.restartAttempts})`);
+      }, delay);
+    }
   };
 
   if (shouldOffer) {
     const channel = pc.createDataChannel('player-state', { ordered: false, maxRetransmits: 0 });
     attachDataChannel(peer.id, connection, channel);
-    pc.createOffer()
-      .then((offer) => pc.setLocalDescription(offer))
-      .then(() => sendSignaling({ type: 'signal', to: peer.id, signal: { description: pc.localDescription } }))
-      .catch(() => toast('P2P接続を開始できませんでした。'));
+    void (async () => {
+      try {
+        const offer = await pc.createOffer();
+        if (state.peerConnections.get(peer.id) !== connection) return;
+        await pc.setLocalDescription(offer);
+        if (state.peerConnections.get(peer.id) !== connection) return;
+        sendSignaling({ type: 'signal', to: peer.id, signal: { description: pc.localDescription } });
+      } catch {
+        if (state.peerConnections.get(peer.id) !== connection) return;
+        sendSignaling({ type: 'restart-peer', to: peer.id });
+        toast('P2P接続を開始できませんでした。');
+      }
+    })();
   }
   return connection;
 }
 
+async function resetPeerConnection(peer) {
+  if (!peer?.id || peer.id === state.playerId || !state.playerId) return;
+  const previousConnection = state.peerConnections.get(peer.id);
+  const attempt = state.roomAttempt;
+  const iceConfiguration = await loadIceConfiguration();
+  if (attempt !== state.roomAttempt || !state.roomJoined
+    || state.signalingSocket?.readyState !== WebSocket.OPEN
+    || state.peerConnections.get(peer.id) !== previousConnection
+    || !state.remoteAvatars.has(peer.id)) return;
+  state.iceServers = iceConfiguration.iceServers;
+  state.iceTransportPolicy = iceConfiguration.iceTransportPolicy;
+  closePeerConnection(peer.id);
+  startPeerConnection(peer, state.playerId < peer.id);
+  updateRoomUi();
+}
+
 async function handleSignal(from, signal) {
-  let connection = state.peerConnections.get(from);
-  if (!connection) connection = startPeerConnection({ id: from, name: 'Guest', color: COLORS[0] }, false);
-  if (!connection) return;
+  const connection = state.peerConnections.get(from);
+  if (!connection || !signal || typeof signal !== 'object') return;
+  const isCurrent = () => state.peerConnections.get(from) === connection;
   try {
     if (signal.description) {
       await connection.pc.setRemoteDescription(signal.description);
-      for (const candidate of connection.pendingCandidates.splice(0)) await connection.pc.addIceCandidate(candidate);
+      if (!isCurrent()) return;
+      for (const candidate of connection.pendingCandidates.splice(0)) {
+        await connection.pc.addIceCandidate(candidate);
+        if (!isCurrent()) return;
+      }
       if (signal.description.type === 'offer') {
         const answer = await connection.pc.createAnswer();
+        if (!isCurrent()) return;
         await connection.pc.setLocalDescription(answer);
+        if (!isCurrent()) return;
         sendSignaling({ type: 'signal', to: from, signal: { description: connection.pc.localDescription } });
       }
     } else if (signal.candidate) {
-      if (connection.pc.remoteDescription) await connection.pc.addIceCandidate(signal.candidate);
-      else connection.pendingCandidates.push(signal.candidate);
+      if (connection.pc.remoteDescription) {
+        await connection.pc.addIceCandidate(signal.candidate);
+        if (!isCurrent()) return;
+      }
+      else if (connection.pendingCandidates.length < 64) connection.pendingCandidates.push(signal.candidate);
     }
   } catch {
-    closePeerConnection(from);
+    if (!isCurrent()) return;
+    sendSignaling({ type: 'restart-peer', to: from });
     toast('P2P接続に失敗しました。ネットワークを確認してください。');
   }
 }
 
-function connectToRoom(roomValue) {
+let iceConfigurationPromise;
+let cachedIceConfiguration = DEFAULT_ICE_CONFIGURATION;
+let iceConfigurationCacheExpiresAt = 0;
+function loadIceConfiguration() {
+  if (iceConfigurationCacheExpiresAt > Date.now()) return Promise.resolve(cachedIceConfiguration);
+  if (!iceConfigurationPromise) {
+    iceConfigurationPromise = (async () => {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 1_500);
+      try {
+        const response = await fetch('/ice-config', { cache: 'no-store', signal: controller.signal });
+        if (!response.ok) throw new Error('ICE configuration unavailable');
+        const config = await response.json();
+        const iceServers = Array.isArray(config?.iceServers) ? config.iceServers.filter((server) => {
+          if (!server || typeof server !== 'object') return false;
+          const urls = Array.isArray(server.urls) ? server.urls : [server.urls];
+          const validUrls = urls.length > 0 && urls.every((url) => typeof url === 'string' && /^(stun|stuns|turn|turns):/i.test(url));
+          const hasTurn = urls.some((url) => typeof url === 'string' && /^(turn|turns):/i.test(url));
+          return validUrls && (!hasTurn || (typeof server.username === 'string' && typeof server.credential === 'string'));
+        }) : [];
+        return {
+          iceServers: iceServers.length ? iceServers : DEFAULT_ICE_SERVERS,
+          iceTransportPolicy: config.iceTransportPolicy === 'relay' && iceServers.some((server) => {
+            const urls = Array.isArray(server.urls) ? server.urls : [server.urls];
+            return urls.some((url) => /^turns?:/i.test(url));
+          }) ? 'relay' : 'all',
+        };
+      } catch {
+        return DEFAULT_ICE_CONFIGURATION;
+      } finally {
+        clearTimeout(timeout);
+      }
+    })().then((configuration) => {
+      cachedIceConfiguration = configuration;
+      iceConfigurationCacheExpiresAt = Date.now() + 8 * 60 * 1_000;
+      return cachedIceConfiguration;
+    }).finally(() => {
+      iceConfigurationPromise = null;
+    });
+  }
+  return iceConfigurationPromise;
+}
+
+async function connectToRoom(roomValue, create = false) {
   if (!state.name) {
     toast('先にユーザー名を設定してください。');
     return;
@@ -354,19 +530,33 @@ function connectToRoom(roomValue) {
     return;
   }
   const room = String(roomValue || '').toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 8);
-  if (!/^[A-Z0-9]{4,8}$/.test(room)) {
-    toast('ルームコードは4〜8文字で入力してください。');
+  if (!/^[A-Z0-9]{8}$/.test(room)) {
+    toast('ルームコードは8文字の英数字で入力してください。');
     return;
   }
 
   state.roomCode = room;
+  state.roomJoined = false;
+  const attempt = ++state.roomAttempt;
+  updateRoomUi();
+  const iceConfiguration = await loadIceConfiguration();
+  state.iceServers = iceConfiguration.iceServers;
+  state.iceTransportPolicy = iceConfiguration.iceTransportPolicy;
+  if (attempt !== state.roomAttempt || state.roomCode !== room) return;
   const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
-  const socket = new WebSocket(`${protocol}//${location.host}/signal`);
+  let socket;
+  try {
+    socket = new WebSocket(`${protocol}//${location.host}/signal`);
+  } catch {
+    leaveRoom(false);
+    toast('シグナリングサーバーに接続できません。');
+    return;
+  }
   state.signalingSocket = socket;
   updateRoomUi();
   socket.addEventListener('open', () => {
     if (state.signalingSocket !== socket) return;
-    socket.send(JSON.stringify({ type: 'join', room, name: state.name, color: state.color }));
+    socket.send(JSON.stringify({ type: 'join', room, create, name: state.name, color: state.color }));
   });
   socket.addEventListener('message', (event) => {
     let message;
@@ -375,18 +565,29 @@ function connectToRoom(roomValue) {
     } catch {
       return;
     }
-    if (message.type === 'room-joined') {
+    if (!message || typeof message !== 'object' || Array.isArray(message)) return;
+    if (message.type === 'room-joined' && typeof message.room === 'string'
+      && /^[A-Z0-9]{8}$/.test(message.room) && typeof message.playerId === 'string'
+      && /^[\da-f-]{36}$/i.test(message.playerId) && Array.isArray(message.peers)) {
       state.roomCode = message.room;
       state.playerId = message.playerId;
-      for (const peer of message.peers) startPeerConnection(peer, state.playerId < peer.id);
+      state.roomJoined = true;
+      for (const peer of message.peers.slice(0, 7)) {
+        const clean = cleanPeer(peer);
+        if (clean) startPeerConnection(clean, state.playerId < clean.id);
+      }
       updateRoomUi();
     } else if (message.type === 'peer-joined') {
-      startPeerConnection(message.peer, state.playerId < message.peer.id);
+      const peer = cleanPeer(message.peer);
+      if (peer && state.playerId) startPeerConnection(peer, state.playerId < peer.id);
       updateRoomUi();
-    } else if (message.type === 'peer-left') {
+    } else if (message.type === 'peer-reset') {
+      const peer = cleanPeer(message.peer);
+      if (peer) resetPeerConnection(peer);
+    } else if (message.type === 'peer-left' && typeof message.id === 'string') {
       closePeerConnection(message.id);
       sceneToast('参加者が退出しました');
-    } else if (message.type === 'signal') {
+    } else if (message.type === 'signal' && typeof message.from === 'string') {
       void handleSignal(message.from, message.signal);
     } else if (message.type === 'error') {
       toast(message.message || 'ルームに接続できませんでした。');
@@ -403,9 +604,11 @@ function connectToRoom(roomValue) {
 
 function leaveRoom(showMessage = true) {
   const wasConnected = Boolean(state.roomCode || state.signalingSocket);
+  state.roomAttempt += 1;
   const socket = state.signalingSocket;
   state.signalingSocket = null;
   state.roomCode = null;
+  state.roomJoined = false;
   state.playerId = null;
   socket?.close();
   for (const id of [...state.peerConnections.keys()]) closePeerConnection(id);
@@ -418,8 +621,14 @@ function leaveRoom(showMessage = true) {
 }
 
 function createRoom() {
-  const room = Math.random().toString(36).slice(2, 8).toUpperCase();
-  connectToRoom(room);
+  try {
+    const bytes = new Uint8Array(8);
+    crypto.getRandomValues(bytes);
+    const room = Array.from(bytes, (byte) => ROOM_ALPHABET[byte & 31]).join('');
+    void connectToRoom(room, true);
+  } catch {
+    toast('安全なルームコードを作成できませんでした。');
+  }
 }
 
 async function copyInviteLink() {
@@ -477,13 +686,17 @@ $('#username-backdrop').hidden = false;
 requestAnimationFrame(() => $('#username-input').focus());
 $('#username-form').addEventListener('submit', (event) => {
   event.preventDefault();
-  const name = $('#username-input').value.trim().slice(0, 16);
+  const name = cleanPlayerName($('#username-input').value);
   if (!name) {
     $('#username-input').focus();
     return;
   }
   state.name = name;
-  localStorage.setItem('kokopla-name', name);
+  try {
+    localStorage.setItem('kokopla-name', name);
+  } catch {
+    // The current session can continue when browser storage is unavailable.
+  }
   updateNameTag();
   $('#username-backdrop').hidden = true;
   joinRoomFromUrl();
@@ -516,7 +729,7 @@ canvas.addEventListener('auxclick', (event) => {
 });
 document.addEventListener('mousemove', (event) => {
   if (document.pointerLockElement !== canvas) return;
-  state.yaw -= event.movementX * 0.0022;
+  state.yaw = wrapAngle(state.yaw - event.movementX * 0.0022);
   state.pitch = clamp(state.pitch - event.movementY * 0.0022, -Math.PI / 2, Math.PI / 2);
 });
 document.addEventListener('pointerlockchange', updatePointerControls);

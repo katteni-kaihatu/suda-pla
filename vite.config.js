@@ -13,10 +13,13 @@ export default defineConfig({
     rollupOptions: {
       input: {
         main: resolve(import.meta.dirname, 'index.html'),
-        avatarImageTest: resolve(import.meta.dirname, 'avatar-image-test.html'),
+      },
+      output: {
+        manualChunks: {
+          'three-vendor': ['three'],
+        },
       },
     },
-    chunkSizeWarningLimit: 550,
   },
   preview: {
     allowedHosts: ['.trycloudflare.com', ...customHosts],

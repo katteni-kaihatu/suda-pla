@@ -21,9 +21,10 @@
 
     <section class="multiplayer-panel" aria-label="マルチプレイ">
       <span class="network-status" id="network-status">未接続</span>
+      <small class="network-privacy-note">P2P通信では、参加者同士にIPアドレスが見える場合があります。</small>
       <button id="create-room-button" type="button">ルーム作成</button>
       <form id="join-room-form">
-        <input id="room-code-input" type="text" maxlength="8" autocomplete="off" placeholder="ルームコード" aria-label="ルームコード" />
+        <input id="room-code-input" type="text" minlength="8" maxlength="8" pattern="[A-Za-z0-9]{8}" autocomplete="off" placeholder="8文字のルームコード" aria-label="ルームコード" />
         <button type="submit">参加</button>
       </form>
       <div class="active-room" id="active-room" hidden>

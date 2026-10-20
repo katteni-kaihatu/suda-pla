@@ -1,31 +1,57 @@
 # kokopla
 
-ブラウザで動く10m × 10mの3D空間です。WebRTC DataChannelで位置・視点を端末間で直接同期し、Cloudflare Tunnel経由のWebSocketはルーム参加と接続交渉に使います。
+ブラウザーで遊べる10m × 10mの軽量な3D空間です。Three.jsで空間を描画し、位置と視点はWebRTC DataChannelで参加者間に直接送ります。WebSocketはルーム参加と接続交渉にだけ使います。
 
-## 起動と公開
+## ローカルで起動
 
-1. `npm install`
-2. `npm run build`
-3. `npm run preview -- --host 0.0.0.0 --port 4173`
-4. 別のターミナルで `cloudflared tunnel --url http://localhost:4173`
-5. 表示された `https://...trycloudflare.com` のURLを参加者に共有
-6. ホストが「ルーム作成」を押し、表示された招待リンクまたはルームコードを共有
+```powershell
+npm ci
+npm run build
+npm run preview
+```
 
-参加者は招待リンクを開くか、同じ公開URLでルームコードを入力します。各ブラウザでユーザー名を設定してください。
+`http://127.0.0.1:4173` を開きます。開発時は `npm run dev` を使えます。開発・Previewサーバーはローカル端末からのみアクセスできる設定です。
 
-## 固定URLで公開
+## Cloudflare Tunnelで共有
 
-Quick TunnelのURLは一時的です。固定URLを使うには、Cloudflareアカウントに独自ドメインを登録し、ダッシュボードの **Networking → Tunnels** からTunnelを作成します。Tunnelに公開アプリケーションのルートを追加し、`plaza.example.com` などのホスト名から `http://127.0.0.1:4173` に接続します。
+Previewを起動したまま、別のPowerShellで次を実行します。
 
-Previewを起動するPowerShellで、ルートに登録したホスト名を許可してから起動します。
+```powershell
+cloudflared tunnel --url http://127.0.0.1:4173
+```
+
+表示された `https://...trycloudflare.com` を共有します。Quick TunnelのURLは一時的です。`cloudflared` が見つからない場合は、Cloudflareの公式手順に従って `cloudflared` をインストールしてください。
+
+常に同じURLを使うには、Cloudflareアカウントに独自ドメインを登録し、ダッシュボードの **Networking → Tunnels** でTunnelを作成します。TunnelのPublic Hostnameを `plaza.example.com` などにし、Serviceを `http://127.0.0.1:4173` に設定します。Previewを起動するPowerShellでホスト名を許可してから起動してください。
 
 ```powershell
 $env:KOKOPLA_ALLOWED_HOSTS = 'plaza.example.com'
 npm run build
-npm run preview -- --host 127.0.0.1 --port 4173 --strictPort
+npm run preview
 ```
 
-Cloudflareダッシュボードに表示されるトークンで `cloudflared` をWindowsサービスとして登録すると、PC起動時にTunnelが接続します。アプリのPreviewプロセスもタスクスケジューラなどで起動時に開始する設定が必要です。固定URLはTunnelの設定で維持されますが、このPCまたはサーバーとアプリが稼働している間だけアクセスできます。常時公開するには、常時稼働するPCまたはサーバーに配置してください。
+固定URLはアプリを動かすPCまたはサーバーが起動している間だけ利用できます。Tunnelとアプリを常時起動するには、`cloudflared` とPreviewをWindowsサービスやタスクスケジューラで起動する設定も必要です。環境変数を使う場合は、Previewを起動するサービス／タスク側にも同じ値を設定してください。
+
+## TURNを設定する
+
+STUNだけで接続できないNATやネットワークではTURNサーバーが必要です。coturnなど、TURN REST API形式の一時資格情報に対応したサーバーを用意し、TURNサーバーとアプリに同じ共有シークレットを設定します。共有シークレットはフロントエンドのビルドに含まれず、ブラウザーには有効期限10分の個別資格情報だけを返します。資格情報の発行は接続元ごとに1分20回までです。TURNサービス側にも利用者数・割当数・転送量の上限を設定してください。アプリの発行制限だけでは、発行済み資格情報の利用量は制限できません。
+
+PowerShellの例です。URLとシークレットは実際のTURNサーバーの設定に合わせてください。
+
+```powershell
+$env:KOKOPLA_TURN_URLS = 'turn:turn.example.com:3478?transport=udp,turns:turn.example.com:5349?transport=tcp'
+$env:KOKOPLA_TURN_SHARED_SECRET = 'coturnのstatic-auth-secretと同じ値'
+npm run build
+npm run preview
+```
+
+coturn側ではTURN REST認証を有効にし、`static-auth-secret` に同じ値を設定します。直接接続を避けてTURN中継だけを使う場合は、TURNを設定したうえで次も指定します。
+
+```powershell
+$env:KOKOPLA_RELAY_ONLY = 'true'
+```
+
+TURNを設定しない場合はSTUN接続を試みますが、全てのネットワークで接続できるわけではありません。通常のP2P接続では参加者同士にネットワークアドレスが見える場合があります。ゲーム画面のマルチプレイ欄にも参加前にこの点を表示します。`KOKOPLA_RELAY_ONLY=true` はTURNサーバー経由に限定しますが、通信遅延とTURN側の通信量が増えます。
 
 ## 操作
 
@@ -36,8 +62,11 @@ Cloudflareダッシュボードに表示されるトークンで `cloudflared` �
 - マウス中クリック：歩行・ノークリップ飛行を切り替え
 - `F`：一人称・三人称視点を切り替え
 
-## レンダー画像の確認
+ルーム作成では推測しにくい8文字のコードを生成します。参加者は招待リンクまたは8文字コードを使います。ルームは最大8人です。
 
-開発サーバー起動後、`http://localhost:5173/avatar-image-test.html` を開くと、仮アバターのレンダー結果を透過PNGで表示できます。確認用の画像は `output/avatar-render/avatar-render.png` に保存済みです。Chromeと開発サーバー（ポート5173）が起動している状態で `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/capture-avatar-render.ps1` を実行すると、同じフォルダのPNGを再生成できます。ページの「PNGを保存」ボタンからもダウンロードできます。
+## 運用上の制約
 
-ルームは最大8人です。TunnelはWebSocketのシグナリングに使い、位置情報はWebRTC DataChannelで端末間を直接送ります。STUN接続できないネットワークではTURNサーバーが必要です。
+- シグナリングサーバーはプロセス内メモリにルームを保持します。Previewを再起動すると全ルームが終了し、複数インスタンス間でルームは共有されません。
+- 同時WebSocket接続数と部屋数には上限があり、無操作で参加しない接続は10秒で閉じます。
+- TURN未設定時は、ネットワーク環境によってP2P接続できないことがあります。
+- Cloudflare Tunnelは公開経路を提供しますが、アプリと端末自体を常時稼働させる必要があります。

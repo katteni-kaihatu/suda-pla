@@ -12,6 +12,7 @@ html, body { width: 100%; height: 100%; height: 100dvh; min-height: 0; margin: 0
 body { min-width: 320px; }
 button, input { font: inherit; }
 button { cursor: pointer; }
+button:focus-visible, input:focus-visible { outline: 2px solid #789f80; outline-offset: 2px; }
 
 #scene, #scene-canvas { position: absolute; inset: 0; width: 100%; height: 100%; }
 #scene { overflow: hidden; background: #dcecf0; }
@@ -31,8 +32,10 @@ body.cursor-locked, body.cursor-locked #scene-canvas { cursor: none; }
 
 .multiplayer-panel { position: absolute; z-index: 4; top: 16px; right: 16px; display: flex; flex-direction: column; gap: 7px; width: min(260px, calc(100vw - 32px)); padding: 11px; border: 1px solid #ffffff85; border-radius: 9px; background: #ffffffd9; color: #65786b; box-shadow: 0 5px 18px #34434412; backdrop-filter: blur(8px); }
 .network-status { font-size: 11px; }
+.network-privacy-note { color: #7a6852; font-size: 10px; line-height: 1.45; }
 .multiplayer-panel button { min-height: 32px; padding: 5px 9px; border: 1px solid #dce8dc; border-radius: 6px; background: #f5f9f3; color: #5f8268; font-size: 11px; }
 .multiplayer-panel button:hover { background: #eaf3e9; }
+.multiplayer-panel button:disabled { cursor: wait; opacity: .55; }
 #join-room-form, .active-room { display: flex; gap: 6px; }
 #join-room-form[hidden] { display: none; }
 #join-room-form input { min-width: 0; width: 100%; height: 32px; padding: 0 8px; border: 1px solid #e2e9e0; border-radius: 6px; background: #fffefa; color: #43574b; font-size: 11px; text-transform: uppercase; }
