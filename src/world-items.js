@@ -11,6 +11,7 @@ const TRANSFER_TIMEOUT_MS = 30_000;
 const IPFS_FETCH_TIMEOUT_MS = 9_000;
 const CARD_SIZE = 1.25;
 const IMAGE_WORLD_SIZE = 1.5;
+const MAX_URL_LENGTH = 2048;
 const MIN_GRAB_DISTANCE = 0.2;
 const MAX_GRAB_DISTANCE = 30;
 const MIN_ITEM_SCALE = 0.15;
@@ -32,6 +33,20 @@ function cleanMimeType(value) {
     && /^[a-z\d.+-]+\/[a-z\d.+-]+$/i.test(value)
     ? value.toLowerCase()
     : 'application/octet-stream';
+}
+
+function normalizeWebUrl(value) {
+  if (typeof value !== 'string') return null;
+  const text = value.trim();
+  if (!text || text.length > MAX_URL_LENGTH || /\s/.test(text)) return null;
+  try {
+    const url = new URL(/^www\./i.test(text) ? `https://${text}` : text);
+    if (!['http:', 'https:'].includes(url.protocol) || !url.hostname
+      || url.username || url.password || url.href.length > MAX_URL_LENGTH) return null;
+    return url.href;
+  } catch {
+    return null;
+  }
 }
 
 function wrapAngle(value) {
@@ -145,7 +160,52 @@ function createFileCardCanvas(item) {
   return { canvas, width: CARD_SIZE, height: CARD_SIZE };
 }
 
+function createUrlCanvas(item) {
+  if (item.bytes.length > MAX_URL_LENGTH * 4) return null;
+  const url = normalizeWebUrl(new TextDecoder().decode(item.bytes));
+  if (!url) return null;
+  const canvas = document.createElement('canvas');
+  canvas.width = 1024;
+  canvas.height = 256;
+  const context = canvas.getContext('2d');
+  if (!context) return null;
+  context.font = '600 42px "Yu Gothic UI", sans-serif';
+  context.textBaseline = 'middle';
+  context.lineJoin = 'round';
+  context.lineWidth = 10;
+  context.strokeStyle = '#ffffffee';
+  context.fillStyle = '#244a3a';
+  const characters = Array.from(url);
+  const lines = [];
+  let line = '';
+  for (const character of characters) {
+    if (line && context.measureText(line + character).width > 924) {
+      lines.push(line);
+      line = '';
+      if (lines.length === 3) break;
+    }
+    line += character;
+  }
+  if (line && lines.length < 3) lines.push(line);
+  if (lines.join('').length < characters.length && lines.length) {
+    let last = lines.at(-1);
+    while (last && context.measureText(`${last}…`).width > 924) last = last.slice(0, -1);
+    lines[lines.length - 1] = `${last}…`;
+  }
+  const lineHeight = 60;
+  const top = (canvas.height - lines.length * lineHeight) / 2 + lineHeight / 2;
+  lines.forEach((text, index) => {
+    const y = top + index * lineHeight;
+    context.strokeText(text, 50, y);
+    context.fillText(text, 50, y);
+  });
+  return { canvas, width: 2, height: 0.5 };
+}
+
 async function createItemCanvas(item) {
+  if (item.mimeType === 'text/uri-list' && item.bytes.length) {
+    return createUrlCanvas(item) || createFileCardCanvas(item);
+  }
   if (item.mimeType.startsWith('image/') && item.bytes.length) {
     let bitmap;
     try {
@@ -490,7 +550,7 @@ export function createWorldItemSystem({ scene, camera, canvas, getConnections, g
       if (channel?.readyState === 'open') {
         channel.send(JSON.stringify({ type: 'world-item-ipfs-fallback', id: pending.id }));
       }
-      toast('IPFSから取得できなかったため、P2P転送に切り替えます。');
+      toast('共有データを取得できなかったため、別の転送方法に切り替えます。');
     });
   }
 
@@ -641,7 +701,7 @@ export function createWorldItemSystem({ scene, camera, canvas, getConnections, g
           try {
             cid = await uploadToIpfs(file);
           } catch {
-            toast(`${cleanFileName(file.name)} のIPFSアップロードに失敗しました。`);
+            toast(`${cleanFileName(file.name)} を保存できませんでした。`);
             continue;
           }
         }
@@ -668,13 +728,9 @@ export function createWorldItemSystem({ scene, camera, canvas, getConnections, g
       }
     }
     if (added) {
-      if (ipfsConfig.enabled) {
-        toast(`${added}件をIPFSに保存しました。CIDを参加者に共有します。`);
-      } else {
-        toast(isRoomJoined()
-          ? `${added}件を配置し、ルーム参加者に共有しました。`
-          : `${added}件を配置しました。ルーム参加中は参加者にも共有されます。`);
-      }
+      toast(isRoomJoined()
+        ? `${added}件を配置し、ルーム参加者に共有しました。`
+        : `${added}件を配置しました。ルーム参加中は参加者にも共有されます。`);
     }
   }
 
@@ -713,6 +769,25 @@ export function createWorldItemSystem({ scene, camera, canvas, getConnections, g
     dropQueue = dropQueue
       .then(() => addDroppedFiles(files, anchor))
       .catch(() => toast('ドロップしたファイルを処理できませんでした。'));
+  }
+
+  function onPaste(event) {
+    if (document.pointerLockElement !== canvas || !event.clipboardData) return;
+    const images = Array.from(event.clipboardData.items || [])
+      .filter((item) => item.kind === 'file' && item.type.startsWith('image/'))
+      .map((item) => item.getAsFile())
+      .filter(Boolean);
+    let files = images;
+    if (!files.length) {
+      const url = normalizeWebUrl(event.clipboardData.getData('text/plain'));
+      if (!url) return;
+      files = [new File([url], `url-${new URL(url).hostname}.txt`, { type: 'text/uri-list' })];
+    }
+    event.preventDefault();
+    const anchor = captureViewAnchor();
+    dropQueue = dropQueue
+      .then(() => addDroppedFiles(files, anchor))
+      .catch(() => toast('貼り付けたデータを配置できませんでした。'));
   }
 
   function pickItem(event) {
@@ -830,6 +905,7 @@ export function createWorldItemSystem({ scene, camera, canvas, getConnections, g
   document.addEventListener('dragover', onDragOver);
   document.addEventListener('dragleave', onDragLeave);
   document.addEventListener('drop', onDrop);
+  document.addEventListener('paste', onPaste);
   canvas.addEventListener('mousedown', onMouseDown);
   canvas.addEventListener('wheel', onWheel, { passive: false });
   canvas.addEventListener('contextmenu', onContextMenu);

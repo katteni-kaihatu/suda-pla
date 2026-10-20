@@ -261,10 +261,6 @@ const ipfsConfigurationPromise = fetch('/ipfs-config', { cache: 'no-store' })
     gateways: Array.isArray(config.gateways) ? config.gateways : [],
   }))
   .catch(() => ({ enabled: false, gateways: [] }));
-void ipfsConfigurationPromise.then(({ enabled }) => {
-  $('#storage-status').textContent = enabled ? 'IPFS分散共有' : 'IPFS未設定 · P2P共有';
-});
-
 const worldItemSystem = createWorldItemSystem({
   scene,
   camera,
@@ -296,9 +292,9 @@ function updateRoomUi() {
   } else if (!state.roomJoined || state.signalingSocket?.readyState !== WebSocket.OPEN) {
     $('#network-status').textContent = `ルーム ${state.roomCode} に接続中`;
   } else if (connectedPeers) {
-    $('#network-status').textContent = `P2P接続中 · ${connectedPeers + 1}人`;
+    $('#network-status').textContent = `接続中 · ${connectedPeers + 1}人`;
   } else if (state.peerConnections.size) {
-    $('#network-status').textContent = `P2P接続を確立中 · ${state.peerConnections.size + 1}人`;
+    $('#network-status').textContent = `接続を確立中 · ${state.peerConnections.size + 1}人`;
   } else {
     $('#network-status').textContent = `ルーム ${state.roomCode} · 参加者を待っています`;
   }
@@ -365,7 +361,7 @@ function attachDataChannel(id, connection, channel) {
     if (state.peerConnections.get(id) === connection) updateRoomUi();
   };
   channel.onerror = () => {
-    if (state.peerConnections.get(id) === connection) toast('P2P通信が不安定です。');
+    if (state.peerConnections.get(id) === connection) toast('通信が不安定です。');
   };
 }
 
@@ -389,7 +385,7 @@ function startPeerConnection(peer, shouldOffer) {
     pc = new RTCPeerConnection({ iceServers: state.iceServers, iceTransportPolicy: state.iceTransportPolicy });
   } catch {
     removeRemoteAvatar(peer.id);
-    toast('このブラウザーではP2P通信を開始できません。');
+    toast('このブラウザーでは通信を開始できません。');
     return null;
   }
   const connection = { pc, channel: null, pendingCandidates: [], shouldOffer, restartTimer: null, restartAttempts: 0 };
@@ -430,7 +426,7 @@ function startPeerConnection(peer, shouldOffer) {
           || state.signalingSocket?.readyState !== WebSocket.OPEN) return;
         connection.restartAttempts += 1;
         sendSignaling({ type: 'restart-peer', to: peer.id });
-        toast(`P2P接続を再試行しています (${connection.restartAttempts})`);
+        toast(`接続を再試行しています (${connection.restartAttempts})`);
       }, delay);
     }
   };
@@ -450,7 +446,7 @@ function startPeerConnection(peer, shouldOffer) {
       } catch {
         if (state.peerConnections.get(peer.id) !== connection) return;
         sendSignaling({ type: 'restart-peer', to: peer.id });
-        toast('P2P接続を開始できませんでした。');
+        toast('接続を開始できませんでした。');
       }
     })();
   }
@@ -502,7 +498,7 @@ async function handleSignal(from, signal) {
   } catch {
     if (!isCurrent()) return;
     sendSignaling({ type: 'restart-peer', to: from });
-    toast('P2P接続に失敗しました。ネットワークを確認してください。');
+    toast('接続に失敗しました。ネットワークを確認してください。');
   }
 }
 
@@ -680,16 +676,10 @@ function joinRoomFromUrl() {
 function updatePointerControls() {
   const isLocked = document.pointerLockElement === renderer.domElement;
   document.body.classList.toggle('cursor-locked', isLocked);
-  $('#immersive-status').textContent = isLocked ? 'マウス操作中 · Escで解除' : 'クリックして視点操作';
-}
-
-function updateMovementMode() {
-  $('#movement-mode').textContent = state.movementMode === 'fly' ? '飛行モード' : '歩行モード';
 }
 
 function updateCameraMode() {
   const isThirdPerson = state.cameraMode === 'third';
-  $('#camera-mode').textContent = isThirdPerson ? '三人称視点' : '一人称視点';
   avatar.visible = isThirdPerson;
   lookGizmo.visible = isThirdPerson;
 }
@@ -701,7 +691,9 @@ function toggleCameraMode() {
 }
 
 const canvas = renderer.domElement;
+canvas.tabIndex = 0;
 function capturePointer() {
+  canvas.focus({ preventScroll: true });
   if (document.pointerLockElement === canvas) return;
   try {
     const request = canvas.requestPointerLock?.();
@@ -741,7 +733,6 @@ $('#copy-room-button').addEventListener('click', copyInviteLink);
 $('#leave-room-button').addEventListener('click', () => leaveRoom());
 
 updatePointerControls();
-updateMovementMode();
 updateCameraMode();
 updateRoomUi();
 canvas.addEventListener('click', capturePointer);
@@ -751,7 +742,6 @@ canvas.addEventListener('mousedown', (event) => {
   state.movementMode = state.movementMode === 'walk' ? 'fly' : 'walk';
   state.jumpVelocity = 0;
   if (state.movementMode === 'walk') state.position.y = 0;
-  updateMovementMode();
   sceneToast(state.movementMode === 'fly' ? '飛行モード' : '歩行モード');
 });
 canvas.addEventListener('auxclick', (event) => {
