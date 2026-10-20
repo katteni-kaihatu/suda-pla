@@ -185,6 +185,7 @@ export function createWorldItemSystem({ scene, camera, canvas, getConnections, g
   const grabOffset = new THREE.Vector3();
   const grabRotation = new THREE.Quaternion();
   const grabWorldRotation = new THREE.Quaternion();
+  const worldUp = new THREE.Vector3(0, 1, 0);
   const rotationStep = new THREE.Quaternion();
   const rotationEuler = new THREE.Euler(0, 0, 0, 'YXZ');
   const dropHint = document.querySelector('#drop-hint');
@@ -731,6 +732,14 @@ export function createWorldItemSystem({ scene, camera, canvas, getConnections, g
   }
 
   function onMouseDown(event) {
+    if (event.button === 0 && grabbedItem) {
+      event.preventDefault();
+      getViewAnchor();
+      grabWorldRotation.setFromAxisAngle(worldUp, grabbedItem.yaw);
+      grabRotation.copy(camera.quaternion).invert().multiply(grabWorldRotation);
+      update(performance.now());
+      return;
+    }
     if (event.button !== 2) return;
     event.preventDefault();
     grabbedItem = pickItem(event) || null;
@@ -778,7 +787,7 @@ export function createWorldItemSystem({ scene, camera, canvas, getConnections, g
       );
     } else {
       const distance = THREE.MathUtils.clamp(
-        grabOffset.length() * Math.exp(delta * 0.001), MIN_GRAB_DISTANCE, MAX_GRAB_DISTANCE,
+        grabOffset.length() * Math.exp(-delta * 0.001), MIN_GRAB_DISTANCE, MAX_GRAB_DISTANCE,
       );
       grabOffset.setLength(distance);
     }

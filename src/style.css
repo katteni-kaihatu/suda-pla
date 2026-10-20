@@ -16,7 +16,7 @@ button:focus-visible, input:focus-visible { outline: 2px solid #789f80; outline-
 
 #scene, #scene-canvas { position: absolute; inset: 0; width: 100%; height: 100%; }
 #scene { overflow: hidden; background: #dcecf0; }
-#scene::after { position: absolute; z-index: 7; inset: 0; border: 5px solid #a8ecf4; box-shadow: inset 0 0 20px #b8f3f766; content: ''; opacity: 0; pointer-events: none; transition: opacity .15s; }
+#scene::after { position: absolute; z-index: 7; inset: 0; border: 5px solid #9ee8b4; box-shadow: inset 0 0 20px #a9f0bc77; content: ''; opacity: 0; pointer-events: none; transition: opacity .15s; }
 body.item-grabbed #scene::after { opacity: 1; }
 #scene-canvas { touch-action: none; cursor: grab; }
 #scene-canvas:active { cursor: grabbing; }
