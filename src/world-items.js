@@ -287,8 +287,7 @@ export function createWorldItemSystem({ scene, camera, canvas, getConnections, g
       scene.remove(item.tether);
       item.tether.geometry.dispose();
       item.tether.material.dispose();
-      item.outline.traverse((part) => part.geometry?.dispose());
-      item.outlineMaterial.dispose();
+      item.outline.material.dispose();
       item.mesh.geometry.dispose();
       item.mesh.material.map?.dispose();
       item.mesh.material.dispose();
@@ -322,22 +321,41 @@ export function createWorldItemSystem({ scene, camera, canvas, getConnections, g
       mesh.quaternion.copy(item.rotation);
       mesh.scale.setScalar(item.scale);
       mesh.userData.worldItemId = item.id;
-      const outline = new THREE.Group();
-      const outlineMaterial = new THREE.MeshBasicMaterial({
-        color: '#9ee8b4', side: THREE.DoubleSide, depthTest: false, depthWrite: false,
-      });
-      const edge = Math.min(0.025, Math.min(card.width, card.height) * 0.06);
-      for (const [width, height, x, y] of [
-        [card.width + edge * 2, edge, 0, card.height / 2 + edge / 2],
-        [card.width + edge * 2, edge, 0, -card.height / 2 - edge / 2],
-        [edge, card.height, -card.width / 2 - edge / 2, 0],
-        [edge, card.height, card.width / 2 + edge / 2, 0],
-      ]) {
-        const strip = new THREE.Mesh(new THREE.PlaneGeometry(width, height), outlineMaterial);
-        strip.position.set(x, y, 0.003);
-        strip.renderOrder = 10;
-        outline.add(strip);
-      }
+      const outline = new THREE.Mesh(mesh.geometry, new THREE.ShaderMaterial({
+        uniforms: { itemTexture: { value: texture } },
+        vertexShader: `
+          varying vec2 itemUv;
+          void main() {
+            itemUv = uv;
+            gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+          }
+        `,
+        fragmentShader: `
+          uniform sampler2D itemTexture;
+          varying vec2 itemUv;
+          float shapeAt(vec2 point) {
+            if (point.x < 0.0 || point.x > 1.0 || point.y < 0.0 || point.y > 1.0) return 0.0;
+            return step(0.06, texture2D(itemTexture, point).a);
+          }
+          void main() {
+            vec2 pixelX = dFdx(itemUv);
+            vec2 pixelY = dFdy(itemUv);
+            float center = shapeAt(itemUv);
+            float edge = max(
+              max(abs(center - shapeAt(itemUv + pixelX)), abs(center - shapeAt(itemUv - pixelX))),
+              max(abs(center - shapeAt(itemUv + pixelY)), abs(center - shapeAt(itemUv - pixelY)))
+            );
+            if (edge < 0.5) discard;
+            gl_FragColor = vec4(0.62, 0.91, 0.71, 0.9);
+          }
+        `,
+        side: THREE.DoubleSide,
+        transparent: true,
+        depthTest: false,
+        depthWrite: false,
+      }));
+      outline.position.z = 0.003;
+      outline.renderOrder = 10;
       outline.visible = Boolean(item.heldBy);
       mesh.add(outline);
       const tetherGeometry = new THREE.BufferGeometry();
@@ -354,7 +372,6 @@ export function createWorldItemSystem({ scene, camera, canvas, getConnections, g
       scene.add(tether);
       item.mesh = mesh;
       item.outline = outline;
-      item.outlineMaterial = outlineMaterial;
       item.tether = tether;
     }).catch(() => toast('データアイテムを表示できませんでした。'));
     return true;
