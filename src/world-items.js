@@ -313,16 +313,7 @@ export function createWorldItemSystem({ scene, cssScene, camera, canvas, getConn
   videoSurface.className = 'video-surface';
   const videoContainer = document.createElement('div');
   videoContainer.className = 'video-player';
-  const closeVideoButton = document.createElement('button');
-  closeVideoButton.className = 'video-close';
-  closeVideoButton.type = 'button';
-  closeVideoButton.textContent = '閉じる ×';
-  const videoUnlockButton = document.createElement('button');
-  videoUnlockButton.className = 'video-unlock';
-  videoUnlockButton.type = 'button';
-  videoUnlockButton.textContent = 'クリックして再生';
-  videoUnlockButton.hidden = true;
-  videoSurface.append(videoContainer, closeVideoButton, videoUnlockButton);
+  videoSurface.append(videoContainer);
   const videoStates = new Map();
   const pendingVideoStates = new Map();
   const videoAuthor = crypto.randomUUID();
@@ -330,6 +321,8 @@ export function createWorldItemSystem({ scene, cssScene, camera, canvas, getConn
   let videoPlayer = null;
   let videoObject = null;
   let videoReady = false;
+  let videoPendingPlay = false;
+  let videoAutoplayBlocked = false;
   let videoOpenToken = 0;
   let videoPollAt = 0;
   let videoBroadcastAt = 0;
@@ -549,10 +542,7 @@ export function createWorldItemSystem({ scene, cssScene, camera, canvas, getConn
   function setVideoMeshMask(item, active) {
     if (!item?.mesh) return;
     const material = item.mesh.material;
-    material.colorWrite = !active;
-    material.depthWrite = active;
-    material.transparent = !active;
-    material.needsUpdate = true;
+    material.opacity = active ? 0 : 1;
   }
 
   function broadcastPosition(item) {
@@ -615,7 +605,7 @@ export function createWorldItemSystem({ scene, cssScene, camera, canvas, getConn
       videoPlayer.seekTo(target, true);
     }
     const playerState = videoPlayer.getPlayerState();
-    if (state.playing && playerState !== 1) {
+    if (state.playing && playerState !== 1 && !videoAutoplayBlocked) {
       suppressedVideoState = { playing: true, until: performance.now() + 3000 };
       videoPlayer.playVideo();
     } else if (!state.playing && playerState !== 2) {
@@ -1081,7 +1071,7 @@ export function createWorldItemSystem({ scene, cssScene, camera, canvas, getConn
       update(performance.now());
       return;
     }
-    if (event.button === 0 && document.pointerLockElement === canvas) {
+    if (event.button === 0) {
       const item = pickItem(event);
       if (youtubeVideoId(itemUrl(item))) {
         event.preventDefault();
@@ -1126,6 +1116,18 @@ export function createWorldItemSystem({ scene, cssScene, camera, canvas, getConn
   }
 
   function onWheel(event) {
+    if (!grabbedItem && event.shiftKey && videoReady && videoPlayer
+      && document.pointerLockElement === canvas && pickItem(event)?.id === videoItemId) {
+      event.preventDefault();
+      const current = videoPlayer.getCurrentTime();
+      const duration = videoPlayer.getDuration() || 86_400;
+      const target = THREE.MathUtils.clamp(current + Math.sign(event.deltaY) * 5, 0, duration);
+      const playing = videoPlayer.getPlayerState() === 1;
+      suppressedVideoState = { playing, until: performance.now() + 3000 };
+      videoPlayer.seekTo(target, true);
+      publishVideoState(playing, target);
+      return;
+    }
     if (!grabbedItem) return;
     event.preventDefault();
     const unit = event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? window.innerHeight : 1;
@@ -1190,28 +1192,35 @@ export function createWorldItemSystem({ scene, cssScene, camera, canvas, getConn
     const videoId = youtubeVideoId(itemUrl(item));
     if (!videoId) return;
     if (videoItemId === item.id) {
-      if (!remote) {
-        document.body.classList.add('video-interacting');
-        if (document.pointerLockElement === canvas) document.exitPointerLock();
-        closeVideoButton.focus();
+      if (remote) {
+        const state = videoStates.get(item.id);
+        if (state) applyVideoState(state);
+      } else if (!videoReady) {
+        videoPendingPlay = !videoPendingPlay;
+      } else {
+        videoAutoplayBlocked = false;
+        const playerState = videoPlayer.getPlayerState();
+        const playing = playerState === 1;
+        const current = playerState === 0 ? 0 : videoPlayer.getCurrentTime();
+        suppressedVideoState = { playing: !playing, until: performance.now() + 3000 };
+        if (playing) videoPlayer.pauseVideo();
+        else {
+          if (playerState === 0) videoPlayer.seekTo(0, true);
+          videoPlayer.playVideo();
+        }
+        publishVideoState(!playing, current);
       }
-      const state = videoStates.get(item.id);
-      if (state) applyVideoState(state);
       return;
     }
     closeVideo();
     const token = ++videoOpenToken;
     videoItemId = item.id;
+    videoPendingPlay = !remote;
+    videoAutoplayBlocked = false;
     videoObject = new CSS3DObject(videoSurface);
     cssScene.add(videoObject);
     setVideoMeshMask(item, true);
     updateVideoSurface(item);
-    videoUnlockButton.hidden = true;
-    if (!remote) {
-      document.body.classList.add('video-interacting');
-      if (document.pointerLockElement === canvas) document.exitPointerLock();
-      closeVideoButton.focus();
-    }
     try {
       const YT = await loadYoutubeApi();
       if (token !== videoOpenToken || videoItemId !== item.id) return;
@@ -1220,7 +1229,7 @@ export function createWorldItemSystem({ scene, cssScene, camera, canvas, getConn
       frame.allow = 'autoplay; encrypted-media; picture-in-picture; web-share';
       frame.allowFullscreen = true;
       frame.referrerPolicy = 'strict-origin-when-cross-origin';
-      frame.src = `https://www.youtube-nocookie.com/embed/${videoId}?enablejsapi=1&playsinline=1&origin=${encodeURIComponent(location.origin)}`;
+      frame.src = `https://www.youtube-nocookie.com/embed/${videoId}?enablejsapi=1&playsinline=1&controls=0&fs=0&origin=${encodeURIComponent(location.origin)}`;
       videoContainer.replaceChildren(frame);
       videoPlayer = new YT.Player(frame, {
         events: {
@@ -1228,12 +1237,17 @@ export function createWorldItemSystem({ scene, cssScene, camera, canvas, getConn
             if (token !== videoOpenToken) return;
             videoReady = true;
             const state = videoStates.get(item.id);
-            if (state) applyVideoState(state);
-            else if (!remote) videoPlayer.playVideo();
+            if (state && videoPendingPlay && !state.playing) {
+              videoPlayer.seekTo(videoPosition(state), true);
+              suppressedVideoState = null;
+              videoPlayer.playVideo();
+            } else if (state) applyVideoState(state);
+            else if (videoPendingPlay) videoPlayer.playVideo();
           },
           onStateChange: (event) => {
             if (token !== videoOpenToken || !videoReady || ![0, 1, 2].includes(event.data)) return;
             const playing = event.data === 1;
+            if (playing) videoAutoplayBlocked = false;
             if (suppressedVideoState && performance.now() < suppressedVideoState.until) {
               if (suppressedVideoState.playing === playing) suppressedVideoState = null;
               return;
@@ -1242,7 +1256,14 @@ export function createWorldItemSystem({ scene, cssScene, camera, canvas, getConn
             publishVideoState(playing, videoPlayer.getCurrentTime());
           },
           onAutoplayBlocked: () => {
-            if (token === videoOpenToken) videoUnlockButton.hidden = false;
+            if (token !== videoOpenToken) return;
+            videoAutoplayBlocked = true;
+            suppressedVideoState = null;
+            if (videoStates.get(item.id)?.author === videoAuthor
+              && videoStates.get(item.id)?.playing) {
+              publishVideoState(false, videoPlayer.getCurrentTime());
+            }
+            toast('自動再生が制限されました。動画カードをクリックして再生してください。');
           },
         },
       });
@@ -1263,9 +1284,9 @@ export function createWorldItemSystem({ scene, cssScene, camera, canvas, getConn
     const item = items.get(videoItemId);
     setVideoMeshMask(item, false);
     videoOpenToken += 1;
-    document.body.classList.remove('video-interacting');
-    videoUnlockButton.hidden = true;
     videoReady = false;
+    videoPendingPlay = false;
+    videoAutoplayBlocked = false;
     videoItemId = null;
     suppressedVideoState = null;
     lastVideoSample = null;
@@ -1287,6 +1308,14 @@ export function createWorldItemSystem({ scene, cssScene, camera, canvas, getConn
       .addScaledVector(videoNormal.set(0, 0, 1).applyQuaternion(item.rotation), 0.006);
     videoObject.quaternion.copy(item.rotation);
     videoObject.scale.setScalar(item.scale * (2 / 960));
+    const floorY = -0.02;
+    const heightDifference = item.y - camera.position.y;
+    const crossing = Math.abs(heightDifference) > 0.0001
+      ? (floorY - camera.position.y) / heightDifference : -1;
+    const crossesFloor = crossing > 0 && crossing < 1
+      && Math.abs(camera.position.x + (item.x - camera.position.x) * crossing) <= 5
+      && Math.abs(camera.position.z + (item.z - camera.position.z) * crossing) <= 5;
+    videoSurface.style.visibility = crossesFloor ? 'hidden' : 'visible';
   }
 
   function update(now) {
@@ -1355,11 +1384,6 @@ export function createWorldItemSystem({ scene, cssScene, camera, canvas, getConn
   document.addEventListener('mouseup', onMouseUp);
   document.addEventListener('keydown', onKeyDown);
   document.addEventListener('keyup', onKeyUp);
-  closeVideoButton.addEventListener('click', closeVideo);
-  videoUnlockButton.addEventListener('click', () => {
-    videoUnlockButton.hidden = true;
-    if (videoReady) videoPlayer?.playVideo();
-  });
   document.addEventListener('keydown', onVideoKeyDown);
   window.addEventListener('blur', releaseGrab);
 

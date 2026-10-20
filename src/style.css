@@ -20,9 +20,8 @@ button:focus-visible, input:focus-visible { outline: 2px solid #789f80; outline-
 body.mode-fly #scene::after { border-color: #7fcdf3; box-shadow: inset 0 0 18px #9bdcf699; }
 #scene-canvas { touch-action: none; cursor: grab; }
 #scene-canvas:active { cursor: grabbing; }
-#scene-canvas canvas { position: absolute; inset: 0; z-index: 1; display: block; width: 100%; height: 100%; outline: none; }
-body.video-interacting #scene-canvas canvas { pointer-events: none; }
-.css3d-layer { position: absolute; inset: 0; z-index: 0; pointer-events: none; }
+#scene-canvas canvas { position: absolute; inset: 0; z-index: 0; display: block; width: 100%; height: 100%; outline: none; }
+.css3d-layer { position: absolute; inset: 0; z-index: 1; pointer-events: none; }
 body.cursor-locked, body.cursor-locked #scene-canvas { cursor: none; }
 
 .reticle { position: absolute; z-index: 2; top: 50%; left: 50%; width: 14px; height: 14px; transform: translate(-50%, -50%); pointer-events: none; opacity: .72; }
@@ -65,13 +64,8 @@ body.cursor-locked, body.cursor-locked #scene-canvas { cursor: none; }
 .dialog-card input:focus { border-color: #a9c7aa; box-shadow: 0 0 0 3px #eef5ec; }
 .dialog-card button { min-height: 40px; border: 0; border-radius: 8px; background: #7fae89; color: white; font-size: 13px; font-weight: 600; }
 .video-surface { position: relative; width: 960px; height: 540px; overflow: hidden; border-radius: 12px; background: #17231c; color: white; pointer-events: none; backface-visibility: hidden; }
-body.video-interacting .video-surface { pointer-events: auto; }
 .video-player { position: absolute; inset: 0; }
-.video-surface iframe { display: block; width: 100%; height: 100%; border: 0; pointer-events: inherit; }
-.video-surface button { position: absolute; z-index: 2; border: 0; border-radius: 6px; padding: 9px 14px; background: #fffefa; color: #405252; font-size: 16px; pointer-events: auto; }
-.video-close { top: 12px; right: 12px; }
-.video-unlock { bottom: 18px; left: 50%; transform: translateX(-50%); white-space: nowrap; }
-.video-surface button[hidden] { display: none; }
+.video-surface iframe { display: block; width: 100%; height: 100%; border: 0; pointer-events: none; }
 
 @media (max-width: 620px) {
   .immersive-hud { top: 10px; left: 10px; padding: 8px 10px; }

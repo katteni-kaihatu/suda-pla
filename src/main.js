@@ -63,10 +63,10 @@ const state = {
 };
 
 const scene = new THREE.Scene();
+scene.background = new THREE.Color('#dcecf0');
 const camera = new THREE.PerspectiveCamera(68, 1, 0.1, 40);
 camera.rotation.order = 'YXZ';
-const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true, powerPreference: 'low-power' });
-renderer.setClearColor('#dcecf0', 0);
+const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'low-power' });
 renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 1.5));
 renderer.setSize(800, 600, false);
 renderer.outputColorSpace = THREE.SRGBColorSpace;
@@ -83,7 +83,7 @@ scene.add(sun);
 
 const floor = new THREE.Mesh(
   new THREE.PlaneGeometry(10, 10),
-  new THREE.MeshStandardMaterial({ color: '#e8eee8', roughness: 1 }),
+  new THREE.MeshStandardMaterial({ color: '#e8eee8', roughness: 1, side: THREE.DoubleSide }),
 );
 floor.rotation.x = -Math.PI / 2;
 floor.position.y = -0.02;
@@ -709,7 +709,6 @@ function toggleCameraMode() {
 const canvas = renderer.domElement;
 canvas.tabIndex = 0;
 function capturePointer() {
-  if (document.body.classList.contains('video-interacting')) return;
   canvas.focus({ preventScroll: true });
   if (document.pointerLockElement === canvas) return;
   try {
@@ -776,7 +775,6 @@ document.addEventListener('pointerlockchange', updatePointerControls);
 document.addEventListener('pointerlockerror', () => toast('マウス操作を開始できませんでした。'));
 
 window.addEventListener('keydown', (event) => {
-  if (document.body.classList.contains('video-interacting')) return;
   if (!$('#username-backdrop').hidden) {
     if (event.key === 'Escape') event.preventDefault();
     return;
