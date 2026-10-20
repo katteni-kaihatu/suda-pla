@@ -233,7 +233,7 @@ async function createItemCanvas(item) {
   return createFileCardCanvas(item);
 }
 
-export function createWorldItemSystem({ scene, camera, canvas, getConnections, getPlayerPose, getIpfsConfig, isRoomJoined, toast }) {
+export function createWorldItemSystem({ scene, camera, canvas, getConnections, getPlayerPose, getRemoteEye, getIpfsConfig, isRoomJoined, toast }) {
   const items = new Map();
   const pendingItems = new Map();
   const raycaster = new THREE.Raycaster();
@@ -242,6 +242,7 @@ export function createWorldItemSystem({ scene, camera, canvas, getConnections, g
   const viewDirection = new THREE.Vector3();
   const viewRight = new THREE.Vector3();
   const playerEye = new THREE.Vector3();
+  const lineOrigin = new THREE.Vector3();
   const grabOffset = new THREE.Vector3();
   const grabRotation = new THREE.Quaternion();
   const grabWorldRotation = new THREE.Quaternion();
@@ -271,16 +272,23 @@ export function createWorldItemSystem({ scene, camera, canvas, getConnections, g
     for (const [itemId, pending] of pendingItems) {
       if (pending.connection === connection) discardPending(itemId);
     }
+    for (const item of items.values()) {
+      if (item.heldBy === connection.worldItemsPeerId) item.heldBy = null;
+    }
   }
 
   function clear() {
     grabbedItem = null;
     rotateHeld = false;
-    document.body.classList.remove('item-grabbed');
     for (const itemId of [...pendingItems.keys()]) discardPending(itemId);
     for (const item of items.values()) {
       if (!item.mesh) continue;
       scene.remove(item.mesh);
+      scene.remove(item.tether);
+      item.tether.geometry.dispose();
+      item.tether.material.dispose();
+      item.outline.traverse((part) => part.geometry?.dispose());
+      item.outlineMaterial.dispose();
       item.mesh.geometry.dispose();
       item.mesh.material.map?.dispose();
       item.mesh.material.dispose();
@@ -295,6 +303,7 @@ export function createWorldItemSystem({ scene, camera, canvas, getConnections, g
     totalBytes += item.size;
     item.rotation ||= itemRotation(item);
     item.scale ??= 1;
+    item.heldBy ||= null;
     items.set(item.id, item);
     void createItemCanvas(item).then((card) => {
       if (items.get(item.id) !== item) return;
@@ -313,8 +322,40 @@ export function createWorldItemSystem({ scene, camera, canvas, getConnections, g
       mesh.quaternion.copy(item.rotation);
       mesh.scale.setScalar(item.scale);
       mesh.userData.worldItemId = item.id;
+      const outline = new THREE.Group();
+      const outlineMaterial = new THREE.MeshBasicMaterial({
+        color: '#9ee8b4', side: THREE.DoubleSide, depthTest: false, depthWrite: false,
+      });
+      const edge = Math.min(0.025, Math.min(card.width, card.height) * 0.06);
+      for (const [width, height, x, y] of [
+        [card.width + edge * 2, edge, 0, card.height / 2 + edge / 2],
+        [card.width + edge * 2, edge, 0, -card.height / 2 - edge / 2],
+        [edge, card.height, -card.width / 2 - edge / 2, 0],
+        [edge, card.height, card.width / 2 + edge / 2, 0],
+      ]) {
+        const strip = new THREE.Mesh(new THREE.PlaneGeometry(width, height), outlineMaterial);
+        strip.position.set(x, y, 0.003);
+        strip.renderOrder = 10;
+        outline.add(strip);
+      }
+      outline.visible = Boolean(item.heldBy);
+      mesh.add(outline);
+      const tetherGeometry = new THREE.BufferGeometry();
+      const points = new THREE.BufferAttribute(new Float32Array(6), 3);
+      points.setUsage(THREE.DynamicDrawUsage);
+      tetherGeometry.setAttribute('position', points);
+      const tether = new THREE.Line(tetherGeometry, new THREE.LineBasicMaterial({
+        color: '#a47bdd', transparent: true, opacity: 0.45, depthTest: false, depthWrite: false,
+      }));
+      tether.frustumCulled = false;
+      tether.renderOrder = 9;
+      tether.visible = false;
       scene.add(mesh);
+      scene.add(tether);
       item.mesh = mesh;
+      item.outline = outline;
+      item.outlineMaterial = outlineMaterial;
+      item.tether = tether;
     }).catch(() => toast('データアイテムを表示できませんでした。'));
     return true;
   }
@@ -369,6 +410,7 @@ export function createWorldItemSystem({ scene, camera, canvas, getConnections, g
       yaw: pending.yaw,
       rotation: pending.rotation,
       scale: pending.scale,
+      heldBy: pending.heldBy,
       bytes: pending.bytes,
     };
     if (!addItem(item)) return;
@@ -397,6 +439,7 @@ export function createWorldItemSystem({ scene, camera, canvas, getConnections, g
       type: 'world-item-position',
       id: item.id,
       ...poseFields(item),
+      holding: item.heldBy === 'local',
     });
     for (const connection of getConnections().values()) {
       const channel = connection.worldItemsChannel;
@@ -404,11 +447,14 @@ export function createWorldItemSystem({ scene, camera, canvas, getConnections, g
     }
   }
 
-  function handlePosition(message) {
+  function handlePosition(message, peerId) {
     const item = items.get(message.id) || pendingItems.get(message.id);
     if (!item || ![message.x, message.y, message.z, message.yaw].every(Number.isFinite)
       || !validTransform(message)) return;
     if ([message.x, message.y, message.z].some((value) => Math.abs(value) > 100)) return;
+    if (item === grabbedItem) return;
+    if (message.holding === true) item.heldBy = peerId;
+    else if (message.holding === false && item.heldBy === peerId) item.heldBy = null;
     if (pendingItems.get(message.id) === item) {
       item.x = message.x;
       item.y = message.y;
@@ -444,6 +490,7 @@ export function createWorldItemSystem({ scene, camera, canvas, getConnections, g
       yaw: wrapAngle(message.yaw),
       rotation: itemRotation(message),
       scale: message.scale ?? 1,
+      heldBy: null,
       bytes: new Uint8Array(message.size),
       nextChunk: 0,
       connection,
@@ -533,6 +580,7 @@ export function createWorldItemSystem({ scene, camera, canvas, getConnections, g
       yaw: wrapAngle(message.yaw),
       rotation: itemRotation(message),
       scale: message.scale ?? 1,
+      heldBy: null,
       bytes: null,
       connection,
       timeout: setTimeout(() => discardPending(message.id), TRANSFER_TIMEOUT_MS),
@@ -584,6 +632,7 @@ export function createWorldItemSystem({ scene, camera, canvas, getConnections, g
       channel.close();
       return;
     }
+    connection.worldItemsPeerId = peerId;
     connection.worldItemsChannel = channel;
     channel.onopen = () => {
       if (getConnections().get(peerId) !== connection) return;
@@ -601,7 +650,7 @@ export function createWorldItemSystem({ scene, camera, canvas, getConnections, g
       if (!message || typeof message !== 'object' || Array.isArray(message)) return;
       if (message.type === 'world-item-start') handleStart(connection, message);
       else if (message.type === 'world-item-chunk') handleChunk(connection, message);
-      else if (message.type === 'world-item-position') handlePosition(message);
+      else if (message.type === 'world-item-position') handlePosition(message, peerId);
       else if (message.type === 'world-item-ipfs') handleIpfsStart(connection, message);
       else if (message.type === 'world-item-ipfs-fallback') sendP2pFallback(connection, message);
     };
@@ -818,14 +867,15 @@ export function createWorldItemSystem({ scene, camera, canvas, getConnections, g
     if (event.button !== 2) return;
     event.preventDefault();
     grabbedItem = pickItem(event) || null;
-    document.body.classList.toggle('item-grabbed', Boolean(grabbedItem));
     if (!grabbedItem) return;
+    grabbedItem.heldBy = 'local';
     getViewAnchor();
     grabWorldRotation.copy(camera.quaternion).invert();
     grabOffset.set(grabbedItem.x, grabbedItem.y, grabbedItem.z)
       .sub(playerEye).applyQuaternion(grabWorldRotation);
     if (grabOffset.lengthSq() < 0.0001) grabOffset.set(0, 0, -MIN_GRAB_DISTANCE);
     grabRotation.copy(grabWorldRotation).multiply(grabbedItem.rotation);
+    broadcastPosition(grabbedItem);
   }
 
   function onMouseUp(event) {
@@ -833,7 +883,7 @@ export function createWorldItemSystem({ scene, camera, canvas, getConnections, g
     const releasedItem = grabbedItem;
     grabbedItem = null;
     rotateHeld = false;
-    document.body.classList.remove('item-grabbed');
+    releasedItem.heldBy = null;
     broadcastPosition(releasedItem);
   }
 
@@ -846,7 +896,7 @@ export function createWorldItemSystem({ scene, camera, canvas, getConnections, g
     const releasedItem = grabbedItem;
     grabbedItem = null;
     rotateHeld = false;
-    document.body.classList.remove('item-grabbed');
+    releasedItem.heldBy = null;
     broadcastPosition(releasedItem);
   }
 
@@ -889,15 +939,36 @@ export function createWorldItemSystem({ scene, camera, canvas, getConnections, g
   }
 
   function update(now) {
-    if (!grabbedItem || items.get(grabbedItem.id) !== grabbedItem) return;
-    getViewAnchor();
-    worldPoint.copy(grabOffset).applyQuaternion(camera.quaternion).add(playerEye);
-    grabWorldRotation.copy(camera.quaternion).multiply(grabRotation);
-    setItemPose(grabbedItem, worldPoint.x, worldPoint.y, worldPoint.z,
-      grabWorldRotation, grabbedItem.scale);
-    if (now - lastPositionBroadcast >= 50) {
-      broadcastPosition(grabbedItem);
-      lastPositionBroadcast = now;
+    if (grabbedItem && items.get(grabbedItem.id) === grabbedItem) {
+      getViewAnchor();
+      worldPoint.copy(grabOffset).applyQuaternion(camera.quaternion).add(playerEye);
+      grabWorldRotation.copy(camera.quaternion).multiply(grabRotation);
+      setItemPose(grabbedItem, worldPoint.x, worldPoint.y, worldPoint.z,
+        grabWorldRotation, grabbedItem.scale);
+      if (now - lastPositionBroadcast >= 50) {
+        broadcastPosition(grabbedItem);
+        lastPositionBroadcast = now;
+      }
+    }
+    for (const item of items.values()) {
+      if (!item.tether) continue;
+      item.outline.visible = Boolean(item.heldBy);
+      if (!item.heldBy) {
+        item.tether.visible = false;
+        continue;
+      }
+      if (item.heldBy === 'local') {
+        const pose = getPlayerPose();
+        lineOrigin.set(pose.x, pose.y, pose.z);
+      } else if (!getRemoteEye(item.heldBy, lineOrigin)) {
+        item.tether.visible = false;
+        continue;
+      }
+      const points = item.tether.geometry.attributes.position;
+      points.setXYZ(0, lineOrigin.x, lineOrigin.y, lineOrigin.z);
+      points.setXYZ(1, item.x, item.y, item.z);
+      points.needsUpdate = true;
+      item.tether.visible = true;
     }
   }
 

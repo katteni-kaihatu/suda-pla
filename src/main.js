@@ -268,6 +268,12 @@ const worldItemSystem = createWorldItemSystem({
   getConnections: () => state.peerConnections,
   getIpfsConfig: () => ipfsConfigurationPromise,
   getPlayerPose: () => ({ x: state.position.x, y: state.position.y + 1.6, z: state.position.z, yaw: state.yaw }),
+  getRemoteEye: (peerId, target) => {
+    const remote = state.remoteAvatars.get(peerId);
+    if (!remote) return false;
+    target.set(remote.root.position.x, remote.root.position.y + 1.6, remote.root.position.z);
+    return true;
+  },
   isRoomJoined: () => state.roomJoined,
   toast,
 });
@@ -678,6 +684,10 @@ function updatePointerControls() {
   document.body.classList.toggle('cursor-locked', isLocked);
 }
 
+function updateMovementMode() {
+  document.body.classList.toggle('mode-fly', state.movementMode === 'fly');
+}
+
 function updateCameraMode() {
   const isThirdPerson = state.cameraMode === 'third';
   avatar.visible = isThirdPerson;
@@ -733,6 +743,7 @@ $('#copy-room-button').addEventListener('click', copyInviteLink);
 $('#leave-room-button').addEventListener('click', () => leaveRoom());
 
 updatePointerControls();
+updateMovementMode();
 updateCameraMode();
 updateRoomUi();
 canvas.addEventListener('click', capturePointer);
@@ -742,6 +753,7 @@ canvas.addEventListener('mousedown', (event) => {
   state.movementMode = state.movementMode === 'walk' ? 'fly' : 'walk';
   state.jumpVelocity = 0;
   if (state.movementMode === 'walk') state.position.y = 0;
+  updateMovementMode();
   sceneToast(state.movementMode === 'fly' ? '飛行モード' : '歩行モード');
 });
 canvas.addEventListener('auxclick', (event) => {
