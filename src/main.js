@@ -770,6 +770,7 @@ document.addEventListener('pointerlockchange', updatePointerControls);
 document.addEventListener('pointerlockerror', () => toast('マウス操作を開始できませんでした。'));
 
 window.addEventListener('keydown', (event) => {
+  if (!$('#video-backdrop').hidden) return;
   if (!$('#username-backdrop').hidden) {
     if (event.key === 'Escape') event.preventDefault();
     return;

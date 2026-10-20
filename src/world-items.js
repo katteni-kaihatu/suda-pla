@@ -14,6 +14,8 @@ const IMAGE_WORLD_SIZE = 1.5;
 const MAX_URL_LENGTH = 2048;
 const MIN_GRAB_DISTANCE = 0.2;
 const MAX_GRAB_DISTANCE = 30;
+const VIDEO_SYNC_INTERVAL_MS = 2500;
+const VIDEO_POLL_INTERVAL_MS = 300;
 const MIN_ITEM_SCALE = 0.15;
 const MAX_ITEM_SCALE = 5;
 const UUID_PATTERN = /^[\da-f-]{36}$/i;
@@ -306,8 +308,21 @@ export function createWorldItemSystem({ scene, camera, canvas, getConnections, g
   const rotationEuler = new THREE.Euler(0, 0, 0, 'YXZ');
   const dropHint = document.querySelector('#drop-hint');
   const videoBackdrop = document.querySelector('#video-backdrop');
-  const videoFrame = document.querySelector('#video-frame');
+  const videoContainer = document.querySelector('#video-player');
   const closeVideoButton = document.querySelector('#close-video-button');
+  const videoUnlockButton = document.querySelector('#video-unlock-button');
+  const videoStates = new Map();
+  const pendingVideoStates = new Map();
+  const videoAuthor = crypto.randomUUID();
+  let videoItemId = null;
+  let videoPlayer = null;
+  let videoReady = false;
+  let videoOpenToken = 0;
+  let videoPollAt = 0;
+  let videoBroadcastAt = 0;
+  let suppressedVideoState = null;
+  let youtubeApiPromise = null;
+  let lastVideoSample = null;
   let totalBytes = 0;
   let pendingBytes = 0;
   let dropDepth = 0;
@@ -336,6 +351,9 @@ export function createWorldItemSystem({ scene, camera, canvas, getConnections, g
   }
 
   function clear() {
+    closeVideo(false);
+    videoStates.clear();
+    pendingVideoStates.clear();
     grabbedItem = null;
     rotateHeld = false;
     for (const itemId of [...pendingItems.keys()]) discardPending(itemId);
@@ -489,6 +507,11 @@ export function createWorldItemSystem({ scene, camera, canvas, getConnections, g
       bytes: pending.bytes,
     };
     if (!addItem(item)) return;
+    const waitingVideoState = pendingVideoStates.get(item.id);
+    if (waitingVideoState) {
+      pendingVideoStates.delete(item.id);
+      handleVideoState(waitingVideoState);
+    }
     for (const connection of getConnections().values()) {
       if (connection !== pending.connection) sendItem(connection, item);
     }
@@ -520,6 +543,92 @@ export function createWorldItemSystem({ scene, camera, canvas, getConnections, g
       const channel = connection.worldItemsChannel;
       if (channel?.readyState === 'open') channel.send(message);
     }
+  }
+
+  function videoPosition(state) {
+    return Math.min(86_400, state.position + (state.playing
+      ? Math.max(0, performance.now() - state.updatedAt) / 1000 : 0));
+  }
+
+  function sendVideoState(connection, itemId, state) {
+    const channel = connection.worldItemsChannel;
+    if (channel?.readyState !== 'open') return;
+    channel.send(JSON.stringify({
+      type: 'world-item-video', id: itemId, author: state.author, clock: state.clock,
+      pulse: state.pulse, playing: state.playing, position: videoPosition(state),
+    }));
+  }
+
+  function publishVideoState(playing, position) {
+    const item = items.get(videoItemId);
+    if (!item || !youtubeVideoId(itemUrl(item)) || !Number.isFinite(position)) return;
+    const previous = videoStates.get(item.id);
+    const state = {
+      author: videoAuthor, clock: (previous?.clock || 0) + 1,
+      pulse: 0, playing, position: THREE.MathUtils.clamp(position, 0, 86_400),
+      updatedAt: performance.now(),
+    };
+    videoStates.set(item.id, state);
+    for (const connection of getConnections().values()) sendVideoState(connection, item.id, state);
+    videoBroadcastAt = performance.now();
+    lastVideoSample = { position: state.position, at: performance.now(), playing };
+  }
+
+  function publishVideoProgress(position) {
+    const state = videoStates.get(videoItemId);
+    if (!state || state.author !== videoAuthor || !state.playing) return;
+    state.position = THREE.MathUtils.clamp(position, 0, 86_400);
+    state.updatedAt = performance.now();
+    state.pulse += 1;
+    for (const connection of getConnections().values()) sendVideoState(connection, videoItemId, state);
+    videoBroadcastAt = performance.now();
+  }
+
+  function applyVideoState(state) {
+    if (!videoReady || !videoPlayer) return;
+    const target = videoPosition(state);
+    const current = videoPlayer.getCurrentTime();
+    if (!Number.isFinite(current) || Math.abs(current - target) > 0.75) {
+      videoPlayer.seekTo(target, true);
+    }
+    const playerState = videoPlayer.getPlayerState();
+    if (state.playing && playerState !== 1) {
+      suppressedVideoState = { playing: true, until: performance.now() + 3000 };
+      videoPlayer.playVideo();
+    } else if (!state.playing && playerState !== 2) {
+      suppressedVideoState = { playing: false, until: performance.now() + 3000 };
+      videoPlayer.pauseVideo();
+    }
+    lastVideoSample = { position: target, at: performance.now(), playing: state.playing };
+  }
+
+  function handleVideoState(message) {
+    if (typeof message.id !== 'string' || !UUID_PATTERN.test(message.id)
+      || typeof message.author !== 'string' || !UUID_PATTERN.test(message.author)
+      || !Number.isSafeInteger(message.clock) || message.clock < 1 || message.clock > 1_000_000_000
+      || !Number.isSafeInteger(message.pulse) || message.pulse < 0 || message.pulse > 1_000_000_000
+      || typeof message.playing !== 'boolean' || !Number.isFinite(message.position)
+      || message.position < 0 || message.position > 86_400) return;
+    const item = items.get(message.id);
+    if (!item) {
+      if (pendingVideoStates.size < MAX_ITEM_COUNT || pendingVideoStates.has(message.id)) {
+        pendingVideoStates.set(message.id, message);
+      }
+      return;
+    }
+    if (!youtubeVideoId(itemUrl(item))) return;
+    const previous = videoStates.get(item.id);
+    if (previous && (message.clock < previous.clock
+      || message.clock === previous.clock && message.author < previous.author
+      || message.clock === previous.clock && message.author === previous.author
+        && message.pulse <= previous.pulse)) return;
+    const state = {
+      author: message.author, clock: message.clock, pulse: message.pulse,
+      playing: message.playing, position: message.position, updatedAt: performance.now(),
+    };
+    videoStates.set(item.id, state);
+    if (state.playing && videoBackdrop.hidden) openVideo(item, true);
+    else if (videoItemId === item.id) applyVideoState(state);
   }
 
   function handlePosition(message, peerId) {
@@ -711,7 +820,11 @@ export function createWorldItemSystem({ scene, camera, canvas, getConnections, g
     connection.worldItemsChannel = channel;
     channel.onopen = () => {
       if (getConnections().get(peerId) !== connection) return;
-      for (const item of items.values()) sendItem(connection, item);
+      for (const item of items.values()) {
+        sendItem(connection, item);
+        const state = videoStates.get(item.id);
+        if (state) sendVideoState(connection, item.id, state);
+      }
     };
     channel.onmessage = (event) => {
       if (getConnections().get(peerId) !== connection || typeof event.data !== 'string'
@@ -728,6 +841,7 @@ export function createWorldItemSystem({ scene, camera, canvas, getConnections, g
       else if (message.type === 'world-item-position') handlePosition(message, peerId);
       else if (message.type === 'world-item-ipfs') handleIpfsStart(connection, message);
       else if (message.type === 'world-item-ipfs-fallback') sendP2pFallback(connection, message);
+      else if (message.type === 'world-item-video') handleVideoState(message);
     };
     channel.onclose = () => discardConnectionTransfers(connection);
     channel.onerror = () => toast('データアイテムの同期に失敗しました。');
@@ -945,13 +1059,10 @@ export function createWorldItemSystem({ scene, camera, canvas, getConnections, g
       return;
     }
     if (event.button === 0 && document.pointerLockElement === canvas) {
-      const videoId = youtubeVideoId(itemUrl(pickItem(event)));
-      if (videoId) {
+      const item = pickItem(event);
+      if (youtubeVideoId(itemUrl(item))) {
         event.preventDefault();
-        document.exitPointerLock();
-        videoFrame.src = `https://www.youtube-nocookie.com/embed/${videoId}?autoplay=1&playsinline=1`;
-        videoBackdrop.hidden = false;
-        closeVideoButton.focus();
+        openVideo(item, false);
         return;
       }
     }
@@ -1029,10 +1140,102 @@ export function createWorldItemSystem({ scene, camera, canvas, getConnections, g
     if (event.key.toLowerCase() === 'e') rotateHeld = false;
   }
 
-  function closeVideo() {
+  function loadYoutubeApi() {
+    if (window.YT?.Player) return Promise.resolve(window.YT);
+    if (youtubeApiPromise) return youtubeApiPromise;
+    youtubeApiPromise = new Promise((resolve, reject) => {
+      const script = document.createElement('script');
+      const timeout = setTimeout(() => reject(new Error('YouTube API timeout')), 12000);
+      window.onYouTubeIframeAPIReady = () => {
+        clearTimeout(timeout);
+        resolve(window.YT);
+      };
+      script.onerror = () => {
+        clearTimeout(timeout);
+        reject(new Error('YouTube API unavailable'));
+      };
+      script.src = 'https://www.youtube.com/iframe_api';
+      document.head.append(script);
+    }).catch((error) => {
+      youtubeApiPromise = null;
+      throw error;
+    });
+    return youtubeApiPromise;
+  }
+
+  async function openVideo(item, remote) {
+    const videoId = youtubeVideoId(itemUrl(item));
+    if (!videoId) return;
+    if (videoItemId === item.id && !videoBackdrop.hidden) {
+      const state = videoStates.get(item.id);
+      if (state) applyVideoState(state);
+      return;
+    }
+    closeVideo(false);
+    const token = ++videoOpenToken;
+    videoItemId = item.id;
+    videoBackdrop.hidden = false;
+    videoUnlockButton.hidden = true;
+    if (document.pointerLockElement === canvas) document.exitPointerLock();
+    closeVideoButton.focus();
+    try {
+      const YT = await loadYoutubeApi();
+      if (token !== videoOpenToken || videoItemId !== item.id) return;
+      const frame = document.createElement('iframe');
+      frame.title = 'YouTube動画';
+      frame.allow = 'autoplay; encrypted-media; picture-in-picture; web-share';
+      frame.allowFullscreen = true;
+      frame.referrerPolicy = 'strict-origin-when-cross-origin';
+      frame.src = `https://www.youtube-nocookie.com/embed/${videoId}?enablejsapi=1&playsinline=1&origin=${encodeURIComponent(location.origin)}`;
+      videoContainer.replaceChildren(frame);
+      videoPlayer = new YT.Player(frame, {
+        events: {
+          onReady: () => {
+            if (token !== videoOpenToken) return;
+            videoReady = true;
+            const state = videoStates.get(item.id);
+            if (state) applyVideoState(state);
+            else if (!remote) videoPlayer.playVideo();
+          },
+          onStateChange: (event) => {
+            if (token !== videoOpenToken || !videoReady || ![0, 1, 2].includes(event.data)) return;
+            const playing = event.data === 1;
+            if (suppressedVideoState && performance.now() < suppressedVideoState.until) {
+              if (suppressedVideoState.playing === playing) suppressedVideoState = null;
+              return;
+            }
+            suppressedVideoState = null;
+            publishVideoState(playing, videoPlayer.getCurrentTime());
+          },
+          onAutoplayBlocked: () => {
+            if (token === videoOpenToken) videoUnlockButton.hidden = false;
+          },
+        },
+      });
+    } catch {
+      if (token === videoOpenToken) {
+        toast('YouTubeプレイヤーを読み込めませんでした。');
+        closeVideo(false);
+      }
+    }
+  }
+
+  function closeVideo(pauseOwned = true) {
     if (videoBackdrop.hidden) return;
+    if (pauseOwned && videoReady && videoPlayer && videoStates.get(videoItemId)?.author === videoAuthor
+      && videoStates.get(videoItemId)?.playing) {
+      publishVideoState(false, videoPlayer.getCurrentTime());
+    }
+    videoOpenToken += 1;
     videoBackdrop.hidden = true;
-    videoFrame.removeAttribute('src');
+    videoUnlockButton.hidden = true;
+    videoReady = false;
+    videoItemId = null;
+    suppressedVideoState = null;
+    lastVideoSample = null;
+    videoPlayer?.destroy();
+    videoPlayer = null;
+    videoContainer.replaceChildren();
     canvas.focus({ preventScroll: true });
   }
 
@@ -1041,6 +1244,26 @@ export function createWorldItemSystem({ scene, camera, canvas, getConnections, g
   }
 
   function update(now) {
+    if (videoReady && videoPlayer && videoItemId && now - videoPollAt >= VIDEO_POLL_INTERVAL_MS) {
+      videoPollAt = now;
+      const current = videoPlayer.getCurrentTime();
+      const playerState = videoPlayer.getPlayerState();
+      const playing = playerState === 1;
+      const shared = videoStates.get(videoItemId);
+      if (Number.isFinite(current) && (playing || playerState === 2) && shared) {
+        const sample = lastVideoSample;
+        const expectedStep = sample?.playing ? (now - sample.at) / 1000 : 0;
+        const jumped = sample && Math.abs(current - sample.position - expectedStep) > 1.5;
+        if (jumped && !suppressedVideoState) publishVideoState(playing, current);
+        else if (shared.author === videoAuthor && playing
+          && now - videoBroadcastAt >= VIDEO_SYNC_INTERVAL_MS) publishVideoProgress(current);
+        else if (shared.author !== videoAuthor && playing
+          && Math.abs(current - videoPosition(shared)) > 2.5) {
+          videoPlayer.seekTo(videoPosition(shared), true);
+        }
+        lastVideoSample = { position: current, at: now, playing };
+      }
+    }
     if (grabbedItem && items.get(grabbedItem.id) === grabbedItem) {
       getViewAnchor();
       worldPoint.copy(grabOffset).applyQuaternion(camera.quaternion).add(playerEye);
@@ -1086,6 +1309,10 @@ export function createWorldItemSystem({ scene, camera, canvas, getConnections, g
   document.addEventListener('keydown', onKeyDown);
   document.addEventListener('keyup', onKeyUp);
   closeVideoButton.addEventListener('click', closeVideo);
+  videoUnlockButton.addEventListener('click', () => {
+    videoUnlockButton.hidden = true;
+    if (videoReady) videoPlayer?.playVideo();
+  });
   videoBackdrop.addEventListener('click', (event) => {
     if (event.target === videoBackdrop) closeVideo();
   });
