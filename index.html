@@ -15,7 +15,7 @@
         <small>中クリックで飛行切替 · Fで視点切替</small>
         <small>Ctrl+Vで画像/URL配置 · ファイルをドロップ</small>
         <small>右ボタンで保持 · 左クリックで垂直/URLを開く</small>
-        <small>YouTubeカードを左クリックで再生</small>
+        <small>YouTubeカードを左クリックで再生・操作</small>
         <small>保持中: ホイールで距離 · Shift+ホイールで大きさ · E+マウスで回転</small>
       </div>
       <div class="drop-hint" id="drop-hint" hidden>
@@ -47,13 +47,6 @@
         <input id="username-input" name="username" type="text" maxlength="16" autocomplete="nickname" required />
         <button type="submit">開始</button>
       </form>
-    </div>
-    <div class="modal-backdrop video-backdrop" id="video-backdrop" hidden>
-      <div class="video-card" role="dialog" aria-modal="true" aria-label="YouTube動画">
-        <button id="close-video-button" type="button" aria-label="動画を閉じる">閉じる ×</button>
-        <div id="video-player" aria-label="YouTube動画"></div>
-        <button id="video-unlock-button" type="button" hidden>クリックして再生</button>
-      </div>
     </div>
     <div class="toast" id="app-toast" role="status" aria-live="polite"></div>
     <script type="module" src="/src/main.js"></script>

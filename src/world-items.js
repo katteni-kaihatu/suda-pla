@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { CSS3DObject } from 'three/addons/renderers/CSS3DRenderer.js';
 
 export const WORLD_ITEMS_CHANNEL_LABEL = 'kokopla-world-items';
 
@@ -290,7 +291,7 @@ async function createItemCanvas(item) {
   return createFileCardCanvas(item);
 }
 
-export function createWorldItemSystem({ scene, camera, canvas, getConnections, getPlayerPose, getRemoteEye, getIpfsConfig, isRoomJoined, toast }) {
+export function createWorldItemSystem({ scene, cssScene, camera, canvas, getConnections, getPlayerPose, getRemoteEye, getIpfsConfig, isRoomJoined, toast }) {
   const items = new Map();
   const pendingItems = new Map();
   const raycaster = new THREE.Raycaster();
@@ -304,18 +305,30 @@ export function createWorldItemSystem({ scene, camera, canvas, getConnections, g
   const grabRotation = new THREE.Quaternion();
   const grabWorldRotation = new THREE.Quaternion();
   const worldUp = new THREE.Vector3(0, 1, 0);
+  const videoNormal = new THREE.Vector3();
   const rotationStep = new THREE.Quaternion();
   const rotationEuler = new THREE.Euler(0, 0, 0, 'YXZ');
   const dropHint = document.querySelector('#drop-hint');
-  const videoBackdrop = document.querySelector('#video-backdrop');
-  const videoContainer = document.querySelector('#video-player');
-  const closeVideoButton = document.querySelector('#close-video-button');
-  const videoUnlockButton = document.querySelector('#video-unlock-button');
+  const videoSurface = document.createElement('div');
+  videoSurface.className = 'video-surface';
+  const videoContainer = document.createElement('div');
+  videoContainer.className = 'video-player';
+  const closeVideoButton = document.createElement('button');
+  closeVideoButton.className = 'video-close';
+  closeVideoButton.type = 'button';
+  closeVideoButton.textContent = '閉じる ×';
+  const videoUnlockButton = document.createElement('button');
+  videoUnlockButton.className = 'video-unlock';
+  videoUnlockButton.type = 'button';
+  videoUnlockButton.textContent = 'クリックして再生';
+  videoUnlockButton.hidden = true;
+  videoSurface.append(videoContainer, closeVideoButton, videoUnlockButton);
   const videoStates = new Map();
   const pendingVideoStates = new Map();
   const videoAuthor = crypto.randomUUID();
   let videoItemId = null;
   let videoPlayer = null;
+  let videoObject = null;
   let videoReady = false;
   let videoOpenToken = 0;
   let videoPollAt = 0;
@@ -449,6 +462,7 @@ export function createWorldItemSystem({ scene, camera, canvas, getConnections, g
       item.mesh = mesh;
       item.outline = outline;
       item.tether = tether;
+      if (item.id === videoItemId) setVideoMeshMask(item, true);
     }).catch(() => toast('データアイテムを表示できませんでした。'));
     return true;
   }
@@ -530,6 +544,15 @@ export function createWorldItemSystem({ scene, camera, canvas, getConnections, g
       item.mesh.scale.setScalar(scale);
       item.mesh.updateMatrixWorld(true);
     }
+  }
+
+  function setVideoMeshMask(item, active) {
+    if (!item?.mesh) return;
+    const material = item.mesh.material;
+    material.colorWrite = !active;
+    material.depthWrite = active;
+    material.transparent = !active;
+    material.needsUpdate = true;
   }
 
   function broadcastPosition(item) {
@@ -627,7 +650,7 @@ export function createWorldItemSystem({ scene, camera, canvas, getConnections, g
       playing: message.playing, position: message.position, updatedAt: performance.now(),
     };
     videoStates.set(item.id, state);
-    if (state.playing && videoBackdrop.hidden) openVideo(item, true);
+    if (state.playing && videoItemId === null) openVideo(item, true);
     else if (videoItemId === item.id) applyVideoState(state);
   }
 
@@ -1166,18 +1189,29 @@ export function createWorldItemSystem({ scene, camera, canvas, getConnections, g
   async function openVideo(item, remote) {
     const videoId = youtubeVideoId(itemUrl(item));
     if (!videoId) return;
-    if (videoItemId === item.id && !videoBackdrop.hidden) {
+    if (videoItemId === item.id) {
+      if (!remote) {
+        document.body.classList.add('video-interacting');
+        if (document.pointerLockElement === canvas) document.exitPointerLock();
+        closeVideoButton.focus();
+      }
       const state = videoStates.get(item.id);
       if (state) applyVideoState(state);
       return;
     }
-    closeVideo(false);
+    closeVideo();
     const token = ++videoOpenToken;
     videoItemId = item.id;
-    videoBackdrop.hidden = false;
+    videoObject = new CSS3DObject(videoSurface);
+    cssScene.add(videoObject);
+    setVideoMeshMask(item, true);
+    updateVideoSurface(item);
     videoUnlockButton.hidden = true;
-    if (document.pointerLockElement === canvas) document.exitPointerLock();
-    closeVideoButton.focus();
+    if (!remote) {
+      document.body.classList.add('video-interacting');
+      if (document.pointerLockElement === canvas) document.exitPointerLock();
+      closeVideoButton.focus();
+    }
     try {
       const YT = await loadYoutubeApi();
       if (token !== videoOpenToken || videoItemId !== item.id) return;
@@ -1221,13 +1255,15 @@ export function createWorldItemSystem({ scene, camera, canvas, getConnections, g
   }
 
   function closeVideo(pauseOwned = true) {
-    if (videoBackdrop.hidden) return;
+    if (videoItemId === null) return;
     if (pauseOwned && videoReady && videoPlayer && videoStates.get(videoItemId)?.author === videoAuthor
       && videoStates.get(videoItemId)?.playing) {
       publishVideoState(false, videoPlayer.getCurrentTime());
     }
+    const item = items.get(videoItemId);
+    setVideoMeshMask(item, false);
     videoOpenToken += 1;
-    videoBackdrop.hidden = true;
+    document.body.classList.remove('video-interacting');
     videoUnlockButton.hidden = true;
     videoReady = false;
     videoItemId = null;
@@ -1236,11 +1272,21 @@ export function createWorldItemSystem({ scene, camera, canvas, getConnections, g
     videoPlayer?.destroy();
     videoPlayer = null;
     videoContainer.replaceChildren();
+    if (videoObject) cssScene.remove(videoObject);
+    videoObject = null;
     canvas.focus({ preventScroll: true });
   }
 
   function onVideoKeyDown(event) {
-    if (event.key === 'Escape' && !videoBackdrop.hidden) closeVideo();
+    if (event.key === 'Escape' && videoItemId !== null) closeVideo();
+  }
+
+  function updateVideoSurface(item) {
+    if (!videoObject || !item || item.id !== videoItemId) return;
+    videoObject.position.set(item.x, item.y, item.z)
+      .addScaledVector(videoNormal.set(0, 0, 1).applyQuaternion(item.rotation), 0.006);
+    videoObject.quaternion.copy(item.rotation);
+    videoObject.scale.setScalar(item.scale * (2 / 960));
   }
 
   function update(now) {
@@ -1275,6 +1321,7 @@ export function createWorldItemSystem({ scene, camera, canvas, getConnections, g
         lastPositionBroadcast = now;
       }
     }
+    if (videoItemId !== null) updateVideoSurface(items.get(videoItemId));
     for (const item of items.values()) {
       if (!item.tether) continue;
       item.outline.visible = Boolean(item.heldBy);
@@ -1312,9 +1359,6 @@ export function createWorldItemSystem({ scene, camera, canvas, getConnections, g
   videoUnlockButton.addEventListener('click', () => {
     videoUnlockButton.hidden = true;
     if (videoReady) videoPlayer?.playVideo();
-  });
-  videoBackdrop.addEventListener('click', (event) => {
-    if (event.target === videoBackdrop) closeVideo();
   });
   document.addEventListener('keydown', onVideoKeyDown);
   window.addEventListener('blur', releaseGrab);

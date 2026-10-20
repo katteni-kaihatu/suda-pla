@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { CSS3DRenderer } from 'three/addons/renderers/CSS3DRenderer.js';
 import './style.css';
 import { createWorldItemSystem, WORLD_ITEMS_CHANNEL_LABEL } from './world-items.js';
 
@@ -62,13 +63,17 @@ const state = {
 };
 
 const scene = new THREE.Scene();
-scene.background = new THREE.Color('#dcecf0');
 const camera = new THREE.PerspectiveCamera(68, 1, 0.1, 40);
 camera.rotation.order = 'YXZ';
-const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'low-power' });
+const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true, powerPreference: 'low-power' });
+renderer.setClearColor('#dcecf0', 0);
 renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 1.5));
 renderer.setSize(800, 600, false);
 renderer.outputColorSpace = THREE.SRGBColorSpace;
+const cssScene = new THREE.Scene();
+const cssRenderer = new CSS3DRenderer();
+cssRenderer.domElement.classList.add('css3d-layer');
+$('#scene-canvas').appendChild(cssRenderer.domElement);
 $('#scene-canvas').appendChild(renderer.domElement);
 
 scene.add(new THREE.HemisphereLight('#ffffff', '#b6c3b8', 2.2));
@@ -263,6 +268,7 @@ const ipfsConfigurationPromise = fetch('/ipfs-config', { cache: 'no-store' })
   .catch(() => ({ enabled: false, gateways: [] }));
 const worldItemSystem = createWorldItemSystem({
   scene,
+  cssScene,
   camera,
   canvas: renderer.domElement,
   getConnections: () => state.peerConnections,
@@ -703,7 +709,7 @@ function toggleCameraMode() {
 const canvas = renderer.domElement;
 canvas.tabIndex = 0;
 function capturePointer() {
-  if (!$('#video-backdrop').hidden) return;
+  if (document.body.classList.contains('video-interacting')) return;
   canvas.focus({ preventScroll: true });
   if (document.pointerLockElement === canvas) return;
   try {
@@ -770,7 +776,7 @@ document.addEventListener('pointerlockchange', updatePointerControls);
 document.addEventListener('pointerlockerror', () => toast('マウス操作を開始できませんでした。'));
 
 window.addEventListener('keydown', (event) => {
-  if (!$('#video-backdrop').hidden) return;
+  if (document.body.classList.contains('video-interacting')) return;
   if (!$('#username-backdrop').hidden) {
     if (event.key === 'Escape') event.preventDefault();
     return;
@@ -873,6 +879,7 @@ function animate(now) {
     state.lastNetworkUpdate = now;
   }
   renderer.render(scene, camera);
+  cssRenderer.render(cssScene, camera);
 }
 requestAnimationFrame(animate);
 
@@ -883,5 +890,6 @@ const resizeObserver = new ResizeObserver(() => {
   camera.aspect = width / height;
   camera.updateProjectionMatrix();
   renderer.setSize(width, height, false);
+  cssRenderer.setSize(width, height);
 });
 resizeObserver.observe($('#scene-canvas'));
