@@ -1,6 +1,7 @@
 import { createHmac, randomUUID } from 'node:crypto';
 import { isIP } from 'node:net';
 import { WebSocket, WebSocketServer } from 'ws';
+import { linkPreview, youtubeThumbnail } from './link-preview.js';
 
 const MAX_ROOM_SIZE = 8;
 const ROOM_CODE_PATTERN = /^[A-Z0-9]{8}$/;
@@ -16,6 +17,7 @@ const MAX_IP_CONNECTIONS = 32;
 const MAX_RATE_LIMIT_KEYS = 10_000;
 const TURN_CREDENTIAL_TTL_SECONDS = 10 * 60;
 const ICE_CONFIG_REQUESTS_PER_MINUTE = 20;
+const previewLimiter = createRateLimiter(60, 60_000);
 const MAX_IPFS_UPLOAD_SIZE = 5 * 1024 * 1024;
 const IPFS_UPLOAD_URL_TTL_SECONDS = 60;
 const DEFAULT_IPFS_GATEWAYS = ['https://ipfs.io/ipfs/', 'https://dweb.link/ipfs/'];
@@ -173,6 +175,28 @@ function installIceConfigMiddleware(server, issueLimiter) {
       'X-Content-Type-Options': 'nosniff',
     });
     response.end(JSON.stringify(getIceServers()));
+  });
+}
+
+function installLinkPreviewMiddleware(server) {
+  server.middlewares.use((request, response, next) => {
+    const pathname = new URL(request.url || '/', 'http://localhost').pathname;
+    if (pathname !== '/link-preview' && pathname !== '/youtube-thumbnail') return next();
+    if (!previewLimiter(getClientKey(request))) {
+      response.writeHead(429, { 'Cache-Control': 'no-store', 'Retry-After': '60' });
+      response.end();
+      return;
+    }
+    const host = request.headers.host || 'localhost';
+    const source = new Request(`http://${host}${request.url}`, { method: request.method });
+    const handler = pathname === '/link-preview' ? linkPreview : youtubeThumbnail;
+    void handler(source).then(async (result) => {
+      response.writeHead(result.status, Object.fromEntries(result.headers));
+      response.end(Buffer.from(await result.arrayBuffer()));
+    }).catch(() => {
+      if (!response.headersSent) response.writeHead(502);
+      response.end();
+    });
   });
 }
 
@@ -521,11 +545,13 @@ export function cloudflareMultiplayer() {
     name: 'kokopla-cloudflare-multiplayer',
     configureServer(server) {
       installIceConfigMiddleware(server, iceConfigLimiter);
+      installLinkPreviewMiddleware(server);
       installIpfsMiddleware(server, ipfsTicketLimiter, ipfsGlobalTicketLimiter);
       attach(server.httpServer, false);
     },
     configurePreviewServer(server) {
       installIceConfigMiddleware(server, iceConfigLimiter);
+      installLinkPreviewMiddleware(server);
       installIpfsMiddleware(server, ipfsTicketLimiter, ipfsGlobalTicketLimiter);
       attach(server.httpServer, true);
     },

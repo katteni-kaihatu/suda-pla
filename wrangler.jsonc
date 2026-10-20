@@ -11,7 +11,9 @@
       "/signal",
       "/ice-config",
       "/ipfs-config",
-      "/ipfs-upload-ticket"
+      "/ipfs-upload-ticket",
+      "/link-preview",
+      "/youtube-thumbnail"
     ]
   },
   "durable_objects": {

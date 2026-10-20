@@ -1,4 +1,5 @@
 import { DurableObject } from 'cloudflare:workers';
+import { linkPreview, youtubeThumbnail } from '../server/link-preview.js';
 
 const MAX_ROOM_SIZE = 8;
 const MAX_ROOMS = 128;
@@ -234,6 +235,13 @@ export default {
       }
       return issueIpfsTicket(env);
     }
+    if (pathname === '/link-preview' || pathname === '/youtube-thumbnail') {
+      if (request.method !== 'GET') return methodNotAllowed('GET');
+      if (!await allowed(env, 'preview', clientKey(request))) {
+        return json(429, { error: 'プレビュー取得の上限に達しました。' }, { 'Retry-After': '60' });
+      }
+      return pathname === '/link-preview' ? linkPreview(request) : youtubeThumbnail(request);
+    }
     return env.ASSETS.fetch(request);
   },
 };
@@ -243,6 +251,7 @@ export class RoomHub extends DurableObject {
     super(ctx, env);
     this.joinTimers = new WeakMap();
     this.iceLimiter = createRateLimiter(20, 60_000);
+    this.previewLimiter = createRateLimiter(60, 60_000);
     this.ipfsLimiter = createRateLimiter(20, 60_000);
     this.joinLimiter = createRateLimiter(20, 60_000);
     this.restartLimiter = createRateLimiter(8, 60_000);
@@ -276,6 +285,7 @@ export class RoomHub extends DurableObject {
   async limit(kind, key) {
     if (typeof key !== 'string' || key.length > 128) return false;
     if (kind === 'ice') return this.iceLimiter(key);
+    if (kind === 'preview') return this.previewLimiter(key);
     if (kind !== 'ipfs' || !this.ipfsLimiter(key)) return false;
     return this.ctx.storage.transaction(async (txn) => {
       const now = Date.now();

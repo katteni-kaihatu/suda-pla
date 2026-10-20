@@ -703,6 +703,7 @@ function toggleCameraMode() {
 const canvas = renderer.domElement;
 canvas.tabIndex = 0;
 function capturePointer() {
+  if (!$('#video-backdrop').hidden) return;
   canvas.focus({ preventScroll: true });
   if (document.pointerLockElement === canvas) return;
   try {

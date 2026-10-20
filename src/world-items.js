@@ -49,6 +49,43 @@ function normalizeWebUrl(value) {
   }
 }
 
+function itemUrl(item) {
+  return item?.mimeType === 'text/uri-list' && item.bytes.length <= MAX_URL_LENGTH * 4
+    ? normalizeWebUrl(new TextDecoder().decode(item.bytes)) : null;
+}
+
+function youtubeVideoId(value) {
+  try {
+    const url = new URL(value);
+    const host = url.hostname.toLowerCase().replace(/^www\./, '');
+    let id = null;
+    if (host === 'youtu.be') id = url.pathname.split('/')[1];
+    else if (host === 'youtube.com' || host === 'm.youtube.com' || host === 'music.youtube.com') {
+      if (url.pathname === '/watch') id = url.searchParams.get('v');
+      else if (/^\/(?:shorts|embed|live)\//.test(url.pathname)) id = url.pathname.split('/')[2];
+    }
+    return /^[\w-]{11}$/.test(id || '') ? id : null;
+  } catch {
+    return null;
+  }
+}
+
+function drawPreviewLines(context, value, x, y, maxWidth, lineHeight, maxLines) {
+  const words = Array.from(value || '');
+  let line = '';
+  let count = 0;
+  for (const character of words) {
+    if (line && context.measureText(line + character).width > maxWidth) {
+      context.fillText(line, x, y + count * lineHeight);
+      count += 1;
+      line = '';
+      if (count >= maxLines) return;
+    }
+    line += character;
+  }
+  if (line && count < maxLines) context.fillText(line, x, y + count * lineHeight);
+}
+
 function wrapAngle(value) {
   return Math.atan2(Math.sin(value), Math.cos(value));
 }
@@ -160,51 +197,69 @@ function createFileCardCanvas(item) {
   return { canvas, width: CARD_SIZE, height: CARD_SIZE };
 }
 
-function createUrlCanvas(item) {
-  if (item.bytes.length > MAX_URL_LENGTH * 4) return null;
-  const url = normalizeWebUrl(new TextDecoder().decode(item.bytes));
+async function createUrlCanvas(item) {
+  const url = itemUrl(item);
   if (!url) return null;
+  const videoId = youtubeVideoId(url);
+  let preview = null;
+  try {
+    const response = await fetch(`/link-preview?url=${encodeURIComponent(url)}`);
+    if (response.ok) preview = await response.json();
+  } catch {
+    // Keep the URL card usable when the destination blocks previews.
+  }
   const canvas = document.createElement('canvas');
   canvas.width = 1024;
-  canvas.height = 256;
+  canvas.height = 576;
   const context = canvas.getContext('2d');
   if (!context) return null;
-  context.font = '600 42px "Yu Gothic UI", sans-serif';
-  context.textBaseline = 'middle';
-  context.lineJoin = 'round';
-  context.lineWidth = 10;
-  context.strokeStyle = '#ffffffee';
-  context.fillStyle = '#244a3a';
-  const characters = Array.from(url);
-  const lines = [];
-  let line = '';
-  for (const character of characters) {
-    if (line && context.measureText(line + character).width > 924) {
-      lines.push(line);
-      line = '';
-      if (lines.length === 3) break;
+  context.fillStyle = '#fffefa';
+  context.beginPath();
+  context.roundRect(5, 5, 1014, 566, 24);
+  context.fill();
+  context.fillStyle = videoId ? '#283a43' : '#e5efe8';
+  context.fillRect(16, 16, 992, 330);
+  if (videoId) {
+    try {
+      const response = await fetch(`/youtube-thumbnail?id=${videoId}`);
+      if (response.ok) {
+        const bitmap = await createImageBitmap(await response.blob());
+        context.drawImage(bitmap, 16, 16, 992, 330);
+        bitmap.close();
+      }
+    } catch {
+      // A video still has a title and a working link without its thumbnail.
     }
-    line += character;
+    context.fillStyle = '#e43d38';
+    context.beginPath();
+    context.roundRect(456, 125, 112, 78, 20);
+    context.fill();
+    context.fillStyle = '#fff';
+    context.beginPath();
+    context.moveTo(500, 144);
+    context.lineTo(500, 184);
+    context.lineTo(534, 164);
+    context.fill();
+  } else {
+    context.fillStyle = '#628b73';
+    context.font = '700 96px "Yu Gothic UI", sans-serif';
+    context.fillText('↗', 60, 208);
   }
-  if (line && lines.length < 3) lines.push(line);
-  if (lines.join('').length < characters.length && lines.length) {
-    let last = lines.at(-1);
-    while (last && context.measureText(`${last}…`).width > 924) last = last.slice(0, -1);
-    lines[lines.length - 1] = `${last}…`;
-  }
-  const lineHeight = 60;
-  const top = (canvas.height - lines.length * lineHeight) / 2 + lineHeight / 2;
-  lines.forEach((text, index) => {
-    const y = top + index * lineHeight;
-    context.strokeText(text, 50, y);
-    context.fillText(text, 50, y);
-  });
-  return { canvas, width: 2, height: 0.5 };
+  context.fillStyle = '#305342';
+  context.font = '700 38px "Yu Gothic UI", sans-serif';
+  drawPreviewLines(context, preview?.title || new URL(url).hostname, 44, 399, 936, 46, 2);
+  context.fillStyle = '#6b8072';
+  context.font = '25px "Yu Gothic UI", sans-serif';
+  drawPreviewLines(context, preview?.description || url, 44, 485, 936, 34, 2);
+  context.fillStyle = '#688d76';
+  context.font = '22px "Yu Gothic UI", sans-serif';
+  context.fillText(new URL(url).hostname, 44, 554, 936);
+  return { canvas, width: 2, height: 1.125 };
 }
 
 async function createItemCanvas(item) {
   if (item.mimeType === 'text/uri-list' && item.bytes.length) {
-    return createUrlCanvas(item) || createFileCardCanvas(item);
+    return await createUrlCanvas(item) || createFileCardCanvas(item);
   }
   if (item.mimeType.startsWith('image/') && item.bytes.length) {
     let bitmap;
@@ -250,6 +305,9 @@ export function createWorldItemSystem({ scene, camera, canvas, getConnections, g
   const rotationStep = new THREE.Quaternion();
   const rotationEuler = new THREE.Euler(0, 0, 0, 'YXZ');
   const dropHint = document.querySelector('#drop-hint');
+  const videoBackdrop = document.querySelector('#video-backdrop');
+  const videoFrame = document.querySelector('#video-frame');
+  const closeVideoButton = document.querySelector('#close-video-button');
   let totalBytes = 0;
   let pendingBytes = 0;
   let dropDepth = 0;
@@ -875,11 +933,27 @@ export function createWorldItemSystem({ scene, camera, canvas, getConnections, g
   function onMouseDown(event) {
     if (event.button === 0 && grabbedItem) {
       event.preventDefault();
+      const url = itemUrl(grabbedItem);
+      if (url) {
+        window.open(url, '_blank', 'noopener,noreferrer');
+        return;
+      }
       getViewAnchor();
       grabWorldRotation.setFromAxisAngle(worldUp, grabbedItem.yaw);
       grabRotation.copy(camera.quaternion).invert().multiply(grabWorldRotation);
       update(performance.now());
       return;
+    }
+    if (event.button === 0 && document.pointerLockElement === canvas) {
+      const videoId = youtubeVideoId(itemUrl(pickItem(event)));
+      if (videoId) {
+        event.preventDefault();
+        document.exitPointerLock();
+        videoFrame.src = `https://www.youtube-nocookie.com/embed/${videoId}?autoplay=1&playsinline=1`;
+        videoBackdrop.hidden = false;
+        closeVideoButton.focus();
+        return;
+      }
     }
     if (event.button !== 2) return;
     event.preventDefault();
@@ -955,6 +1029,17 @@ export function createWorldItemSystem({ scene, camera, canvas, getConnections, g
     if (event.key.toLowerCase() === 'e') rotateHeld = false;
   }
 
+  function closeVideo() {
+    if (videoBackdrop.hidden) return;
+    videoBackdrop.hidden = true;
+    videoFrame.removeAttribute('src');
+    canvas.focus({ preventScroll: true });
+  }
+
+  function onVideoKeyDown(event) {
+    if (event.key === 'Escape' && !videoBackdrop.hidden) closeVideo();
+  }
+
   function update(now) {
     if (grabbedItem && items.get(grabbedItem.id) === grabbedItem) {
       getViewAnchor();
@@ -1000,6 +1085,11 @@ export function createWorldItemSystem({ scene, camera, canvas, getConnections, g
   document.addEventListener('mouseup', onMouseUp);
   document.addEventListener('keydown', onKeyDown);
   document.addEventListener('keyup', onKeyUp);
+  closeVideoButton.addEventListener('click', closeVideo);
+  videoBackdrop.addEventListener('click', (event) => {
+    if (event.target === videoBackdrop) closeVideo();
+  });
+  document.addEventListener('keydown', onVideoKeyDown);
   window.addEventListener('blur', releaseGrab);
 
   return {
