@@ -374,7 +374,7 @@ export function createWorldItemSystem({ scene, cssScene, camera, canvas, getConn
     item.scale ??= 1;
     item.heldBy ||= null;
     items.set(item.id, item);
-    if (youtubeVideoId(itemUrl(item))) void loadYoutubeApi().catch(() => {});
+    if (youtubeVideoId(itemUrl(item))) void openVideo(item, true, false, true);
     void createItemCanvas(item).then((card) => {
       if (items.get(item.id) !== item) return;
       const texture = new THREE.CanvasTexture(card.canvas);
@@ -444,7 +444,7 @@ export function createWorldItemSystem({ scene, cssScene, camera, canvas, getConn
       item.mesh = mesh;
       item.outline = outline;
       item.tether = tether;
-      if (videoSessions.has(item.id)) setVideoMeshMask(item, true);
+      if (videoSessions.get(item.id)?.active) setVideoMeshMask(item, true);
     }).catch(() => toast('データアイテムを表示できませんでした。'));
     return true;
   }
@@ -670,7 +670,10 @@ export function createWorldItemSystem({ scene, cssScene, camera, canvas, getConn
     videoStates.set(item.id, state);
     const session = videoSessions.get(item.id);
     if (state.playing && !session) openVideo(item, true);
-    else if (session) applyVideoState(session, state);
+    else if (session) {
+      if (state.playing) activateVideo(session, item);
+      applyVideoState(session, state);
+    }
   }
 
   function handlePosition(message, peerId) {
@@ -1264,30 +1267,42 @@ export function createWorldItemSystem({ scene, cssScene, camera, canvas, getConn
     }
   }
 
-  async function openVideo(item, remote, interact = false) {
+  function activateVideo(session, item) {
+    if (session.active) return;
+    session.active = true;
+    setVideoMeshMask(item, true);
+    updateVideoSurface(session, item);
+  }
+
+  async function openVideo(item, remote, interact = false, preload = false) {
     const videoId = youtubeVideoId(itemUrl(item));
     if (!videoId) return;
     const existing = videoSessions.get(item.id);
     if (existing) {
       if (remote) {
         const state = videoStates.get(item.id);
+        if (state?.playing) activateVideo(existing, item);
         if (state) applyVideoState(existing, state);
-      } else if (interact) {
-        enterVideoInteraction(existing);
-      } else if (!existing.ready) {
-        existing.pendingPlay = !existing.pendingPlay;
       } else {
-        existing.autoplayBlocked = false;
-        const playerState = existing.player.getPlayerState();
-        const playing = playerState === 1;
-        const current = playerState === 0 ? 0 : existing.player.getCurrentTime();
-        existing.suppressedState = { playing: !playing, until: performance.now() + 3000 };
-        if (playing) existing.player.pauseVideo();
-        else {
-          if (playerState === 0) existing.player.seekTo(0, true);
-          existing.player.playVideo();
+        activateVideo(existing, item);
+        if (interact) {
+          enterVideoInteraction(existing);
+        } else if (!existing.ready) {
+          existing.pendingPlay = !existing.pendingPlay;
+        } else {
+          existing.autoplayBlocked = false;
+          const playerState = existing.player.getPlayerState();
+          const playing = playerState === 1;
+          const current = playerState === 0 ? 0 : existing.player.getCurrentTime();
+          existing.suppressedState = { playing: !playing, until: performance.now() + 3000 };
+          if (playing) existing.player.pauseVideo();
+          else {
+            if (playerState === 0) existing.player.seekTo(0, true);
+            existing.player.unMute();
+            existing.player.playVideo();
+          }
+          publishVideoState(existing, !playing, current);
         }
-        publishVideoState(existing, !playing, current);
       }
       return;
     }
@@ -1309,14 +1324,14 @@ export function createWorldItemSystem({ scene, cssScene, camera, canvas, getConn
     const session = {
       itemId: item.id, surface, container, returnButton, closeButton,
       object: new CSS3DObject(surface), player: null, ready: false,
-      pendingPlay: !remote, autoplayBlocked: false, mutedFallback: false, pollAt: 0,
+      active: !preload, pendingPlay: !remote, autoplayBlocked: false, pollAt: 0,
       broadcastAt: 0, suppressedState: null, lastSample: null,
     };
     videoSessions.set(item.id, session);
     returnButton.addEventListener('click', () => leaveVideoInteraction(true));
     closeButton.addEventListener('click', () => closeVideo(item.id));
     cssScene.add(session.object);
-    setVideoMeshMask(item, true);
+    if (session.active) setVideoMeshMask(item, true);
     updateVideoSurface(session, item);
     if (interact) enterVideoInteraction(session);
     try {
@@ -1338,9 +1353,13 @@ export function createWorldItemSystem({ scene, cssScene, camera, canvas, getConn
             if (state && session.pendingPlay && !state.playing) {
               session.player.seekTo(videoPosition(state), true);
               session.suppressedState = null;
+              session.player.unMute();
               session.player.playVideo();
             } else if (state) applyVideoState(session, state);
-            else if (session.pendingPlay) session.player.playVideo();
+            else if (session.pendingPlay) {
+              session.player.unMute();
+              session.player.playVideo();
+            }
           },
           onStateChange: (event) => {
             if (videoSessions.get(item.id) !== session || !session.ready
@@ -1358,13 +1377,6 @@ export function createWorldItemSystem({ scene, cssScene, camera, canvas, getConn
             if (videoSessions.get(item.id) !== session) return;
             session.autoplayBlocked = true;
             session.suppressedState = null;
-            if (!session.mutedFallback) {
-              session.mutedFallback = true;
-              session.player.mute();
-              session.player.playVideo();
-              toast('ブラウザの制限により無音で再生します。音声はShift+左クリックで操作できます。');
-              return;
-            }
             if (videoStates.get(item.id)?.author === videoAuthor
               && videoStates.get(item.id)?.playing) {
               publishVideoState(session, false, session.player.getCurrentTime());
@@ -1417,7 +1429,7 @@ export function createWorldItemSystem({ scene, cssScene, camera, canvas, getConn
     const crossesFloor = crossing > 0 && crossing < 1
       && Math.abs(camera.position.x + (item.x - camera.position.x) * crossing) <= 5
       && Math.abs(camera.position.z + (item.z - camera.position.z) * crossing) <= 5;
-    session.surface.style.visibility = crossesFloor ? 'hidden' : 'visible';
+    session.surface.style.visibility = !session.active || crossesFloor ? 'hidden' : 'visible';
   }
 
   function update(now) {
