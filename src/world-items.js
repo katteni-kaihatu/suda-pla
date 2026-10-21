@@ -311,6 +311,7 @@ export function createWorldItemSystem({ scene, cssScene, camera, canvas, getConn
   const dropHint = document.querySelector('#drop-hint');
   const videoStates = new Map();
   const pendingVideoStates = new Map();
+  const deletedItemIds = new Set();
   const videoAuthor = crypto.randomUUID();
   const videoSessions = new Map();
   let interactingVideoId = null;
@@ -346,6 +347,7 @@ export function createWorldItemSystem({ scene, cssScene, camera, canvas, getConn
     for (const itemId of [...videoSessions.keys()]) closeVideo(itemId, false);
     videoStates.clear();
     pendingVideoStates.clear();
+    deletedItemIds.clear();
     grabbedItem = null;
     rotateHeld = false;
     for (const itemId of [...pendingItems.keys()]) discardPending(itemId);
@@ -365,7 +367,7 @@ export function createWorldItemSystem({ scene, cssScene, camera, canvas, getConn
   }
 
   function addItem(item) {
-    if (items.has(item.id) || items.size + pendingItems.size >= MAX_ITEM_COUNT
+    if (deletedItemIds.has(item.id) || items.has(item.id) || items.size + pendingItems.size >= MAX_ITEM_COUNT
       || totalBytes + pendingBytes + item.size > MAX_TOTAL_BYTES) return false;
     totalBytes += item.size;
     item.rotation ||= itemRotation(item);
@@ -544,6 +546,44 @@ export function createWorldItemSystem({ scene, cssScene, camera, canvas, getConn
     }
   }
 
+  function removeItem(itemId) {
+    if (deletedItemIds.has(itemId)) return false;
+    const item = items.get(itemId);
+    deletedItemIds.add(itemId);
+    if (deletedItemIds.size > 1024) deletedItemIds.delete(deletedItemIds.values().next().value);
+    discardPending(itemId);
+    pendingVideoStates.delete(itemId);
+    videoStates.delete(itemId);
+    if (!item) return true;
+    closeVideo(itemId, false);
+    if (grabbedItem === item) {
+      grabbedItem = null;
+      rotateHeld = false;
+    }
+    items.delete(itemId);
+    totalBytes = Math.max(0, totalBytes - item.size);
+    if (item.mesh) {
+      scene.remove(item.mesh);
+      scene.remove(item.tether);
+      item.tether.geometry.dispose();
+      item.tether.material.dispose();
+      item.outline.material.dispose();
+      item.mesh.geometry.dispose();
+      item.mesh.material.map?.dispose();
+      item.mesh.material.dispose();
+    }
+    return true;
+  }
+
+  function broadcastDelete(itemId, exceptConnection = null) {
+    const message = JSON.stringify({ type: 'world-item-delete', id: itemId });
+    for (const connection of getConnections().values()) {
+      if (connection === exceptConnection) continue;
+      const channel = connection.worldItemsChannel;
+      if (channel?.readyState === 'open') channel.send(message);
+    }
+  }
+
   function videoPosition(state) {
     return Math.min(86_400, state.position + (state.playing
       ? Math.max(0, performance.now() - state.updatedAt) / 1000 : 0));
@@ -608,6 +648,7 @@ export function createWorldItemSystem({ scene, cssScene, camera, canvas, getConn
       || !Number.isSafeInteger(message.pulse) || message.pulse < 0 || message.pulse > 1_000_000_000
       || typeof message.playing !== 'boolean' || !Number.isFinite(message.position)
       || message.position < 0 || message.position > 86_400) return;
+    if (deletedItemIds.has(message.id)) return;
     const item = items.get(message.id);
     if (!item) {
       if (pendingVideoStates.size < MAX_ITEM_COUNT || pendingVideoStates.has(message.id)) {
@@ -653,7 +694,7 @@ export function createWorldItemSystem({ scene, cssScene, camera, canvas, getConn
 
   function handleStart(connection, message) {
     if (typeof message.id !== 'string' || !UUID_PATTERN.test(message.id)
-      || items.has(message.id) || pendingItems.has(message.id)
+      || deletedItemIds.has(message.id) || items.has(message.id) || pendingItems.has(message.id)
       || typeof message.name !== 'string' || message.name.length > 256
       || !Number.isSafeInteger(message.size) || message.size < 0 || message.size > MAX_FILE_SIZE
       || !Number.isInteger(message.chunkCount) || message.chunkCount !== Math.ceil(message.size / CHUNK_SIZE)
@@ -742,7 +783,7 @@ export function createWorldItemSystem({ scene, cssScene, camera, canvas, getConn
 
   function handleIpfsStart(connection, message) {
     if (typeof message.id !== 'string' || !UUID_PATTERN.test(message.id)
-      || items.has(message.id) || pendingItems.has(message.id)
+      || deletedItemIds.has(message.id) || items.has(message.id) || pendingItems.has(message.id)
       || typeof message.name !== 'string' || message.name.length > 256
       || typeof message.cid !== 'string' || !CID_V1_PATTERN.test(message.cid)
       || !Number.isSafeInteger(message.size) || message.size < 0 || message.size > MAX_FILE_SIZE
@@ -820,6 +861,9 @@ export function createWorldItemSystem({ scene, cssScene, camera, canvas, getConn
     connection.worldItemsChannel = channel;
     channel.onopen = () => {
       if (getConnections().get(peerId) !== connection) return;
+      for (const itemId of deletedItemIds) {
+        channel.send(JSON.stringify({ type: 'world-item-delete', id: itemId }));
+      }
       for (const item of items.values()) {
         sendItem(connection, item);
         const state = videoStates.get(item.id);
@@ -842,6 +886,10 @@ export function createWorldItemSystem({ scene, cssScene, camera, canvas, getConn
       else if (message.type === 'world-item-ipfs') handleIpfsStart(connection, message);
       else if (message.type === 'world-item-ipfs-fallback') sendP2pFallback(connection, message);
       else if (message.type === 'world-item-video') handleVideoState(message);
+      else if (message.type === 'world-item-delete' && typeof message.id === 'string'
+        && UUID_PATTERN.test(message.id) && removeItem(message.id)) {
+        broadcastDelete(message.id, connection);
+      }
     };
     channel.onclose = () => discardConnectionTransfers(connection);
     channel.onerror = () => toast('データアイテムの同期に失敗しました。');
@@ -1048,7 +1096,7 @@ export function createWorldItemSystem({ scene, cssScene, camera, canvas, getConn
     if (event.button === 0 && grabbedItem) {
       event.preventDefault();
       const url = itemUrl(grabbedItem);
-      if (url) {
+      if (url && !youtubeVideoId(url)) {
         window.open(url, '_blank', 'noopener,noreferrer');
         return;
       }
@@ -1062,7 +1110,7 @@ export function createWorldItemSystem({ scene, cssScene, camera, canvas, getConn
       const item = pickItem(event);
       if (youtubeVideoId(itemUrl(item))) {
         event.preventDefault();
-        openVideo(item, false, document.pointerLockElement !== canvas);
+        openVideo(item, false, event.shiftKey);
         return;
       }
     }
@@ -1143,8 +1191,18 @@ export function createWorldItemSystem({ scene, cssScene, camera, canvas, getConn
   }
 
   function onKeyDown(event) {
-    if (event.key.toLowerCase() !== 'e' || !grabbedItem
-      || document.pointerLockElement !== canvas) return;
+    if (!grabbedItem || document.pointerLockElement !== canvas) return;
+    if (event.key === 'Delete') {
+      event.preventDefault();
+      if (event.repeat) return;
+      const itemId = grabbedItem.id;
+      if (removeItem(itemId)) {
+        broadcastDelete(itemId);
+        toast('アイテムを削除しました。');
+      }
+      return;
+    }
+    if (event.key.toLowerCase() !== 'e') return;
     event.preventDefault();
     rotateHeld = true;
   }
@@ -1213,7 +1271,7 @@ export function createWorldItemSystem({ scene, cssScene, camera, canvas, getConn
       if (remote) {
         const state = videoStates.get(item.id);
         if (state) applyVideoState(existing, state);
-      } else if (interact || existing.autoplayBlocked) {
+      } else if (interact) {
         enterVideoInteraction(existing);
       } else if (!existing.ready) {
         existing.pendingPlay = !existing.pendingPlay;
@@ -1303,7 +1361,7 @@ export function createWorldItemSystem({ scene, cssScene, camera, canvas, getConn
               && videoStates.get(item.id)?.playing) {
               publishVideoState(session, false, session.player.getCurrentTime());
             }
-            toast('再生が制限されました。板をもう一度クリックして直接操作できます。');
+            toast('再生が制限されました。Shift+左クリックで動画を直接操作できます。');
           },
         },
       });
