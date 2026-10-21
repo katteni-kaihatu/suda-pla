@@ -374,6 +374,7 @@ export function createWorldItemSystem({ scene, cssScene, camera, canvas, getConn
     item.scale ??= 1;
     item.heldBy ||= null;
     items.set(item.id, item);
+    if (youtubeVideoId(itemUrl(item))) void loadYoutubeApi().catch(() => {});
     void createItemCanvas(item).then((card) => {
       if (items.get(item.id) !== item) return;
       const texture = new THREE.CanvasTexture(card.canvas);
@@ -1308,7 +1309,7 @@ export function createWorldItemSystem({ scene, cssScene, camera, canvas, getConn
     const session = {
       itemId: item.id, surface, container, returnButton, closeButton,
       object: new CSS3DObject(surface), player: null, ready: false,
-      pendingPlay: !remote, autoplayBlocked: false, pollAt: 0,
+      pendingPlay: !remote, autoplayBlocked: false, mutedFallback: false, pollAt: 0,
       broadcastAt: 0, suppressedState: null, lastSample: null,
     };
     videoSessions.set(item.id, session);
@@ -1357,6 +1358,13 @@ export function createWorldItemSystem({ scene, cssScene, camera, canvas, getConn
             if (videoSessions.get(item.id) !== session) return;
             session.autoplayBlocked = true;
             session.suppressedState = null;
+            if (!session.mutedFallback) {
+              session.mutedFallback = true;
+              session.player.mute();
+              session.player.playVideo();
+              toast('ブラウザの制限により無音で再生します。音声はShift+左クリックで操作できます。');
+              return;
+            }
             if (videoStates.get(item.id)?.author === videoAuthor
               && videoStates.get(item.id)?.playing) {
               publishVideoState(session, false, session.player.getCurrentTime());
