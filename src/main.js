@@ -709,6 +709,7 @@ function toggleCameraMode() {
 const canvas = renderer.domElement;
 canvas.tabIndex = 0;
 function capturePointer() {
+  if (document.body.classList.contains('video-interacting')) return;
   canvas.focus({ preventScroll: true });
   if (document.pointerLockElement === canvas) return;
   try {

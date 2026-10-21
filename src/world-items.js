@@ -313,7 +313,17 @@ export function createWorldItemSystem({ scene, cssScene, camera, canvas, getConn
   videoSurface.className = 'video-surface';
   const videoContainer = document.createElement('div');
   videoContainer.className = 'video-player';
-  videoSurface.append(videoContainer);
+  const videoReturnButton = document.createElement('button');
+  videoReturnButton.className = 'video-return';
+  videoReturnButton.type = 'button';
+  videoReturnButton.textContent = '視点操作へ戻る';
+  videoReturnButton.hidden = true;
+  const videoCloseButton = document.createElement('button');
+  videoCloseButton.className = 'video-close';
+  videoCloseButton.type = 'button';
+  videoCloseButton.textContent = '閉じる';
+  videoCloseButton.hidden = true;
+  videoSurface.append(videoContainer, videoReturnButton, videoCloseButton);
   const videoStates = new Map();
   const pendingVideoStates = new Map();
   const videoAuthor = crypto.randomUUID();
@@ -1075,7 +1085,7 @@ export function createWorldItemSystem({ scene, cssScene, camera, canvas, getConn
       const item = pickItem(event);
       if (youtubeVideoId(itemUrl(item))) {
         event.preventDefault();
-        openVideo(item, false);
+        openVideo(item, false, document.pointerLockElement !== canvas);
         return;
       }
     }
@@ -1188,13 +1198,37 @@ export function createWorldItemSystem({ scene, cssScene, camera, canvas, getConn
     return youtubeApiPromise;
   }
 
-  async function openVideo(item, remote) {
+  function enterVideoInteraction() {
+    if (videoItemId === null) return;
+    document.body.classList.add('video-interacting');
+    videoReturnButton.hidden = false;
+    videoCloseButton.hidden = false;
+    if (document.pointerLockElement === canvas) document.exitPointerLock();
+  }
+
+  function leaveVideoInteraction(relock = false) {
+    document.body.classList.remove('video-interacting');
+    videoReturnButton.hidden = true;
+    videoCloseButton.hidden = true;
+    if (relock) {
+      canvas.focus({ preventScroll: true });
+      try {
+        canvas.requestPointerLock()?.catch(() => toast('視点操作を再開できませんでした。'));
+      } catch {
+        toast('視点操作を再開できませんでした。');
+      }
+    }
+  }
+
+  async function openVideo(item, remote, interact = false) {
     const videoId = youtubeVideoId(itemUrl(item));
     if (!videoId) return;
     if (videoItemId === item.id) {
       if (remote) {
         const state = videoStates.get(item.id);
         if (state) applyVideoState(state);
+      } else if (interact || videoAutoplayBlocked) {
+        enterVideoInteraction();
       } else if (!videoReady) {
         videoPendingPlay = !videoPendingPlay;
       } else {
@@ -1221,6 +1255,7 @@ export function createWorldItemSystem({ scene, cssScene, camera, canvas, getConn
     cssScene.add(videoObject);
     setVideoMeshMask(item, true);
     updateVideoSurface(item);
+    if (interact) enterVideoInteraction();
     try {
       const YT = await loadYoutubeApi();
       if (token !== videoOpenToken || videoItemId !== item.id) return;
@@ -1229,7 +1264,7 @@ export function createWorldItemSystem({ scene, cssScene, camera, canvas, getConn
       frame.allow = 'autoplay; encrypted-media; picture-in-picture; web-share';
       frame.allowFullscreen = true;
       frame.referrerPolicy = 'strict-origin-when-cross-origin';
-      frame.src = `https://www.youtube-nocookie.com/embed/${videoId}?enablejsapi=1&playsinline=1&controls=0&fs=0&origin=${encodeURIComponent(location.origin)}`;
+      frame.src = `https://www.youtube-nocookie.com/embed/${videoId}?enablejsapi=1&playsinline=1&controls=1&origin=${encodeURIComponent(location.origin)}`;
       videoContainer.replaceChildren(frame);
       videoPlayer = new YT.Player(frame, {
         events: {
@@ -1263,7 +1298,12 @@ export function createWorldItemSystem({ scene, cssScene, camera, canvas, getConn
               && videoStates.get(item.id)?.playing) {
               publishVideoState(false, videoPlayer.getCurrentTime());
             }
-            toast('自動再生が制限されました。動画カードをクリックして再生してください。');
+            if (videoPendingPlay) {
+              enterVideoInteraction();
+              toast('動画面の再生ボタンを押し、視点操作へ戻ってください。');
+            } else {
+              toast('動画の再生が制限されました。板をクリックして直接操作できます。');
+            }
           },
         },
       });
@@ -1284,6 +1324,7 @@ export function createWorldItemSystem({ scene, cssScene, camera, canvas, getConn
     const item = items.get(videoItemId);
     setVideoMeshMask(item, false);
     videoOpenToken += 1;
+    leaveVideoInteraction();
     videoReady = false;
     videoPendingPlay = false;
     videoAutoplayBlocked = false;
@@ -1299,7 +1340,9 @@ export function createWorldItemSystem({ scene, cssScene, camera, canvas, getConn
   }
 
   function onVideoKeyDown(event) {
-    if (event.key === 'Escape' && videoItemId !== null) closeVideo();
+    if (event.key === 'Escape' && document.body.classList.contains('video-interacting')) {
+      leaveVideoInteraction();
+    }
   }
 
   function updateVideoSurface(item) {
@@ -1385,6 +1428,8 @@ export function createWorldItemSystem({ scene, cssScene, camera, canvas, getConn
   document.addEventListener('keydown', onKeyDown);
   document.addEventListener('keyup', onKeyUp);
   document.addEventListener('keydown', onVideoKeyDown);
+  videoReturnButton.addEventListener('click', () => leaveVideoInteraction(true));
+  videoCloseButton.addEventListener('click', () => closeVideo());
   window.addEventListener('blur', releaseGrab);
 
   return {
