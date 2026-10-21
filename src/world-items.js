@@ -309,36 +309,12 @@ export function createWorldItemSystem({ scene, cssScene, camera, canvas, getConn
   const rotationStep = new THREE.Quaternion();
   const rotationEuler = new THREE.Euler(0, 0, 0, 'YXZ');
   const dropHint = document.querySelector('#drop-hint');
-  const videoSurface = document.createElement('div');
-  videoSurface.className = 'video-surface';
-  const videoContainer = document.createElement('div');
-  videoContainer.className = 'video-player';
-  const videoReturnButton = document.createElement('button');
-  videoReturnButton.className = 'video-return';
-  videoReturnButton.type = 'button';
-  videoReturnButton.textContent = '視点操作へ戻る';
-  videoReturnButton.hidden = true;
-  const videoCloseButton = document.createElement('button');
-  videoCloseButton.className = 'video-close';
-  videoCloseButton.type = 'button';
-  videoCloseButton.textContent = '閉じる';
-  videoCloseButton.hidden = true;
-  videoSurface.append(videoContainer, videoReturnButton, videoCloseButton);
   const videoStates = new Map();
   const pendingVideoStates = new Map();
   const videoAuthor = crypto.randomUUID();
-  let videoItemId = null;
-  let videoPlayer = null;
-  let videoObject = null;
-  let videoReady = false;
-  let videoPendingPlay = false;
-  let videoAutoplayBlocked = false;
-  let videoOpenToken = 0;
-  let videoPollAt = 0;
-  let videoBroadcastAt = 0;
-  let suppressedVideoState = null;
+  const videoSessions = new Map();
+  let interactingVideoId = null;
   let youtubeApiPromise = null;
-  let lastVideoSample = null;
   let totalBytes = 0;
   let pendingBytes = 0;
   let dropDepth = 0;
@@ -367,7 +343,7 @@ export function createWorldItemSystem({ scene, cssScene, camera, canvas, getConn
   }
 
   function clear() {
-    closeVideo(false);
+    for (const itemId of [...videoSessions.keys()]) closeVideo(itemId, false);
     videoStates.clear();
     pendingVideoStates.clear();
     grabbedItem = null;
@@ -465,7 +441,7 @@ export function createWorldItemSystem({ scene, cssScene, camera, canvas, getConn
       item.mesh = mesh;
       item.outline = outline;
       item.tether = tether;
-      if (item.id === videoItemId) setVideoMeshMask(item, true);
+      if (videoSessions.has(item.id)) setVideoMeshMask(item, true);
     }).catch(() => toast('データアイテムを表示できませんでした。'));
     return true;
   }
@@ -582,8 +558,8 @@ export function createWorldItemSystem({ scene, cssScene, camera, canvas, getConn
     }));
   }
 
-  function publishVideoState(playing, position) {
-    const item = items.get(videoItemId);
+  function publishVideoState(session, playing, position) {
+    const item = items.get(session.itemId);
     if (!item || !youtubeVideoId(itemUrl(item)) || !Number.isFinite(position)) return;
     const previous = videoStates.get(item.id);
     const state = {
@@ -593,36 +569,36 @@ export function createWorldItemSystem({ scene, cssScene, camera, canvas, getConn
     };
     videoStates.set(item.id, state);
     for (const connection of getConnections().values()) sendVideoState(connection, item.id, state);
-    videoBroadcastAt = performance.now();
-    lastVideoSample = { position: state.position, at: performance.now(), playing };
+    session.broadcastAt = performance.now();
+    session.lastSample = { position: state.position, at: performance.now(), playing };
   }
 
-  function publishVideoProgress(position) {
-    const state = videoStates.get(videoItemId);
+  function publishVideoProgress(session, position) {
+    const state = videoStates.get(session.itemId);
     if (!state || state.author !== videoAuthor || !state.playing) return;
     state.position = THREE.MathUtils.clamp(position, 0, 86_400);
     state.updatedAt = performance.now();
     state.pulse += 1;
-    for (const connection of getConnections().values()) sendVideoState(connection, videoItemId, state);
-    videoBroadcastAt = performance.now();
+    for (const connection of getConnections().values()) sendVideoState(connection, session.itemId, state);
+    session.broadcastAt = performance.now();
   }
 
-  function applyVideoState(state) {
-    if (!videoReady || !videoPlayer) return;
+  function applyVideoState(session, state) {
+    if (!session.ready || !session.player) return;
     const target = videoPosition(state);
-    const current = videoPlayer.getCurrentTime();
+    const current = session.player.getCurrentTime();
     if (!Number.isFinite(current) || Math.abs(current - target) > 0.75) {
-      videoPlayer.seekTo(target, true);
+      session.player.seekTo(target, true);
     }
-    const playerState = videoPlayer.getPlayerState();
-    if (state.playing && playerState !== 1 && !videoAutoplayBlocked) {
-      suppressedVideoState = { playing: true, until: performance.now() + 3000 };
-      videoPlayer.playVideo();
+    const playerState = session.player.getPlayerState();
+    if (state.playing && playerState !== 1 && !session.autoplayBlocked) {
+      session.suppressedState = { playing: true, until: performance.now() + 3000 };
+      session.player.playVideo();
     } else if (!state.playing && playerState !== 2) {
-      suppressedVideoState = { playing: false, until: performance.now() + 3000 };
-      videoPlayer.pauseVideo();
+      session.suppressedState = { playing: false, until: performance.now() + 3000 };
+      session.player.pauseVideo();
     }
-    lastVideoSample = { position: target, at: performance.now(), playing: state.playing };
+    session.lastSample = { position: target, at: performance.now(), playing: state.playing };
   }
 
   function handleVideoState(message) {
@@ -650,8 +626,9 @@ export function createWorldItemSystem({ scene, cssScene, camera, canvas, getConn
       playing: message.playing, position: message.position, updatedAt: performance.now(),
     };
     videoStates.set(item.id, state);
-    if (state.playing && videoItemId === null) openVideo(item, true);
-    else if (videoItemId === item.id) applyVideoState(state);
+    const session = videoSessions.get(item.id);
+    if (state.playing && !session) openVideo(item, true);
+    else if (session) applyVideoState(session, state);
   }
 
   function handlePosition(message, peerId) {
@@ -1126,16 +1103,17 @@ export function createWorldItemSystem({ scene, cssScene, camera, canvas, getConn
   }
 
   function onWheel(event) {
-    if (!grabbedItem && event.shiftKey && videoReady && videoPlayer
-      && document.pointerLockElement === canvas && pickItem(event)?.id === videoItemId) {
+    const session = !grabbedItem && event.shiftKey && document.pointerLockElement === canvas
+      ? videoSessions.get(pickItem(event)?.id) : null;
+    if (session?.ready && session.player) {
       event.preventDefault();
-      const current = videoPlayer.getCurrentTime();
-      const duration = videoPlayer.getDuration() || 86_400;
+      const current = session.player.getCurrentTime();
+      const duration = session.player.getDuration() || 86_400;
       const target = THREE.MathUtils.clamp(current + Math.sign(event.deltaY) * 5, 0, duration);
-      const playing = videoPlayer.getPlayerState() === 1;
-      suppressedVideoState = { playing, until: performance.now() + 3000 };
-      videoPlayer.seekTo(target, true);
-      publishVideoState(playing, target);
+      const playing = session.player.getPlayerState() === 1;
+      session.suppressedState = { playing, until: performance.now() + 3000 };
+      session.player.seekTo(target, true);
+      publishVideoState(session, playing, target);
       return;
     }
     if (!grabbedItem) return;
@@ -1198,18 +1176,25 @@ export function createWorldItemSystem({ scene, cssScene, camera, canvas, getConn
     return youtubeApiPromise;
   }
 
-  function enterVideoInteraction() {
-    if (videoItemId === null) return;
+  function enterVideoInteraction(session) {
+    leaveVideoInteraction();
+    interactingVideoId = session.itemId;
     document.body.classList.add('video-interacting');
-    videoReturnButton.hidden = false;
-    videoCloseButton.hidden = false;
+    session.surface.classList.add('is-interacting');
+    session.returnButton.hidden = false;
+    session.closeButton.hidden = false;
     if (document.pointerLockElement === canvas) document.exitPointerLock();
   }
 
   function leaveVideoInteraction(relock = false) {
+    const session = videoSessions.get(interactingVideoId);
+    session?.surface.classList.remove('is-interacting');
+    if (session) {
+      session.returnButton.hidden = true;
+      session.closeButton.hidden = true;
+    }
+    interactingVideoId = null;
     document.body.classList.remove('video-interacting');
-    videoReturnButton.hidden = true;
-    videoCloseButton.hidden = true;
     if (relock) {
       canvas.focus({ preventScroll: true });
       try {
@@ -1223,119 +1208,127 @@ export function createWorldItemSystem({ scene, cssScene, camera, canvas, getConn
   async function openVideo(item, remote, interact = false) {
     const videoId = youtubeVideoId(itemUrl(item));
     if (!videoId) return;
-    if (videoItemId === item.id) {
+    const existing = videoSessions.get(item.id);
+    if (existing) {
       if (remote) {
         const state = videoStates.get(item.id);
-        if (state) applyVideoState(state);
-      } else if (interact || videoAutoplayBlocked) {
-        enterVideoInteraction();
-      } else if (!videoReady) {
-        videoPendingPlay = !videoPendingPlay;
+        if (state) applyVideoState(existing, state);
+      } else if (interact || existing.autoplayBlocked) {
+        enterVideoInteraction(existing);
+      } else if (!existing.ready) {
+        existing.pendingPlay = !existing.pendingPlay;
       } else {
-        videoAutoplayBlocked = false;
-        const playerState = videoPlayer.getPlayerState();
+        existing.autoplayBlocked = false;
+        const playerState = existing.player.getPlayerState();
         const playing = playerState === 1;
-        const current = playerState === 0 ? 0 : videoPlayer.getCurrentTime();
-        suppressedVideoState = { playing: !playing, until: performance.now() + 3000 };
-        if (playing) videoPlayer.pauseVideo();
+        const current = playerState === 0 ? 0 : existing.player.getCurrentTime();
+        existing.suppressedState = { playing: !playing, until: performance.now() + 3000 };
+        if (playing) existing.player.pauseVideo();
         else {
-          if (playerState === 0) videoPlayer.seekTo(0, true);
-          videoPlayer.playVideo();
+          if (playerState === 0) existing.player.seekTo(0, true);
+          existing.player.playVideo();
         }
-        publishVideoState(!playing, current);
+        publishVideoState(existing, !playing, current);
       }
       return;
     }
-    closeVideo();
-    const token = ++videoOpenToken;
-    videoItemId = item.id;
-    videoPendingPlay = !remote;
-    videoAutoplayBlocked = false;
-    videoObject = new CSS3DObject(videoSurface);
-    cssScene.add(videoObject);
+    const surface = document.createElement('div');
+    surface.className = 'video-surface';
+    const container = document.createElement('div');
+    container.className = 'video-player';
+    const returnButton = document.createElement('button');
+    returnButton.className = 'video-return';
+    returnButton.type = 'button';
+    returnButton.textContent = '視点操作へ戻る';
+    returnButton.hidden = true;
+    const closeButton = document.createElement('button');
+    closeButton.className = 'video-close';
+    closeButton.type = 'button';
+    closeButton.textContent = '閉じる';
+    closeButton.hidden = true;
+    surface.append(container, returnButton, closeButton);
+    const session = {
+      itemId: item.id, surface, container, returnButton, closeButton,
+      object: new CSS3DObject(surface), player: null, ready: false,
+      pendingPlay: !remote, autoplayBlocked: false, pollAt: 0,
+      broadcastAt: 0, suppressedState: null, lastSample: null,
+    };
+    videoSessions.set(item.id, session);
+    returnButton.addEventListener('click', () => leaveVideoInteraction(true));
+    closeButton.addEventListener('click', () => closeVideo(item.id));
+    cssScene.add(session.object);
     setVideoMeshMask(item, true);
-    updateVideoSurface(item);
-    if (interact) enterVideoInteraction();
+    updateVideoSurface(session, item);
+    if (interact) enterVideoInteraction(session);
     try {
       const YT = await loadYoutubeApi();
-      if (token !== videoOpenToken || videoItemId !== item.id) return;
+      if (videoSessions.get(item.id) !== session) return;
       const frame = document.createElement('iframe');
       frame.title = 'YouTube動画';
       frame.allow = 'autoplay; encrypted-media; picture-in-picture; web-share';
       frame.allowFullscreen = true;
       frame.referrerPolicy = 'strict-origin-when-cross-origin';
       frame.src = `https://www.youtube-nocookie.com/embed/${videoId}?enablejsapi=1&playsinline=1&controls=1&origin=${encodeURIComponent(location.origin)}`;
-      videoContainer.replaceChildren(frame);
-      videoPlayer = new YT.Player(frame, {
+      container.replaceChildren(frame);
+      session.player = new YT.Player(frame, {
         events: {
           onReady: () => {
-            if (token !== videoOpenToken) return;
-            videoReady = true;
+            if (videoSessions.get(item.id) !== session) return;
+            session.ready = true;
             const state = videoStates.get(item.id);
-            if (state && videoPendingPlay && !state.playing) {
-              videoPlayer.seekTo(videoPosition(state), true);
-              suppressedVideoState = null;
-              videoPlayer.playVideo();
-            } else if (state) applyVideoState(state);
-            else if (videoPendingPlay) videoPlayer.playVideo();
+            if (state && session.pendingPlay && !state.playing) {
+              session.player.seekTo(videoPosition(state), true);
+              session.suppressedState = null;
+              session.player.playVideo();
+            } else if (state) applyVideoState(session, state);
+            else if (session.pendingPlay) session.player.playVideo();
           },
           onStateChange: (event) => {
-            if (token !== videoOpenToken || !videoReady || ![0, 1, 2].includes(event.data)) return;
+            if (videoSessions.get(item.id) !== session || !session.ready
+              || ![0, 1, 2].includes(event.data)) return;
             const playing = event.data === 1;
-            if (playing) videoAutoplayBlocked = false;
-            if (suppressedVideoState && performance.now() < suppressedVideoState.until) {
-              if (suppressedVideoState.playing === playing) suppressedVideoState = null;
+            if (playing) session.autoplayBlocked = false;
+            if (session.suppressedState && performance.now() < session.suppressedState.until) {
+              if (session.suppressedState.playing === playing) session.suppressedState = null;
               return;
             }
-            suppressedVideoState = null;
-            publishVideoState(playing, videoPlayer.getCurrentTime());
+            session.suppressedState = null;
+            publishVideoState(session, playing, session.player.getCurrentTime());
           },
           onAutoplayBlocked: () => {
-            if (token !== videoOpenToken) return;
-            videoAutoplayBlocked = true;
-            suppressedVideoState = null;
+            if (videoSessions.get(item.id) !== session) return;
+            session.autoplayBlocked = true;
+            session.suppressedState = null;
             if (videoStates.get(item.id)?.author === videoAuthor
               && videoStates.get(item.id)?.playing) {
-              publishVideoState(false, videoPlayer.getCurrentTime());
+              publishVideoState(session, false, session.player.getCurrentTime());
             }
-            if (videoPendingPlay) {
-              enterVideoInteraction();
-              toast('動画面の再生ボタンを押し、視点操作へ戻ってください。');
-            } else {
-              toast('動画の再生が制限されました。板をクリックして直接操作できます。');
-            }
+            toast('再生が制限されました。板をもう一度クリックして直接操作できます。');
           },
         },
       });
     } catch {
-      if (token === videoOpenToken) {
+      if (videoSessions.get(item.id) === session) {
         toast('YouTubeプレイヤーを読み込めませんでした。');
-        closeVideo(false);
+        closeVideo(item.id, false);
       }
     }
   }
 
-  function closeVideo(pauseOwned = true) {
-    if (videoItemId === null) return;
-    if (pauseOwned && videoReady && videoPlayer && videoStates.get(videoItemId)?.author === videoAuthor
-      && videoStates.get(videoItemId)?.playing) {
-      publishVideoState(false, videoPlayer.getCurrentTime());
+  function closeVideo(itemId, pauseOwned = true) {
+    const session = videoSessions.get(itemId);
+    if (!session) return;
+    if (pauseOwned && session.ready && session.player
+      && videoStates.get(itemId)?.author === videoAuthor
+      && videoStates.get(itemId)?.playing) {
+      publishVideoState(session, false, session.player.getCurrentTime());
     }
-    const item = items.get(videoItemId);
-    setVideoMeshMask(item, false);
-    videoOpenToken += 1;
-    leaveVideoInteraction();
-    videoReady = false;
-    videoPendingPlay = false;
-    videoAutoplayBlocked = false;
-    videoItemId = null;
-    suppressedVideoState = null;
-    lastVideoSample = null;
-    videoPlayer?.destroy();
-    videoPlayer = null;
-    videoContainer.replaceChildren();
-    if (videoObject) cssScene.remove(videoObject);
-    videoObject = null;
+    setVideoMeshMask(items.get(itemId), false);
+    if (interactingVideoId === itemId) leaveVideoInteraction();
+    videoSessions.delete(itemId);
+    session.player?.destroy();
+    session.container.replaceChildren();
+    cssScene.remove(session.object);
     canvas.focus({ preventScroll: true });
   }
 
@@ -1345,12 +1338,12 @@ export function createWorldItemSystem({ scene, cssScene, camera, canvas, getConn
     }
   }
 
-  function updateVideoSurface(item) {
-    if (!videoObject || !item || item.id !== videoItemId) return;
-    videoObject.position.set(item.x, item.y, item.z)
+  function updateVideoSurface(session, item) {
+    if (!item) return;
+    session.object.position.set(item.x, item.y, item.z)
       .addScaledVector(videoNormal.set(0, 0, 1).applyQuaternion(item.rotation), 0.006);
-    videoObject.quaternion.copy(item.rotation);
-    videoObject.scale.setScalar(item.scale * (2 / 960));
+    session.object.quaternion.copy(item.rotation);
+    session.object.scale.setScalar(item.scale * (2 / 960));
     const floorY = -0.02;
     const heightDifference = item.y - camera.position.y;
     const crossing = Math.abs(heightDifference) > 0.0001
@@ -1358,28 +1351,29 @@ export function createWorldItemSystem({ scene, cssScene, camera, canvas, getConn
     const crossesFloor = crossing > 0 && crossing < 1
       && Math.abs(camera.position.x + (item.x - camera.position.x) * crossing) <= 5
       && Math.abs(camera.position.z + (item.z - camera.position.z) * crossing) <= 5;
-    videoSurface.style.visibility = crossesFloor ? 'hidden' : 'visible';
+    session.surface.style.visibility = crossesFloor ? 'hidden' : 'visible';
   }
 
   function update(now) {
-    if (videoReady && videoPlayer && videoItemId && now - videoPollAt >= VIDEO_POLL_INTERVAL_MS) {
-      videoPollAt = now;
-      const current = videoPlayer.getCurrentTime();
-      const playerState = videoPlayer.getPlayerState();
+    for (const session of videoSessions.values()) {
+      if (!session.ready || !session.player || now - session.pollAt < VIDEO_POLL_INTERVAL_MS) continue;
+      session.pollAt = now;
+      const current = session.player.getCurrentTime();
+      const playerState = session.player.getPlayerState();
       const playing = playerState === 1;
-      const shared = videoStates.get(videoItemId);
+      const shared = videoStates.get(session.itemId);
       if (Number.isFinite(current) && (playing || playerState === 2) && shared) {
-        const sample = lastVideoSample;
+        const sample = session.lastSample;
         const expectedStep = sample?.playing ? (now - sample.at) / 1000 : 0;
         const jumped = sample && Math.abs(current - sample.position - expectedStep) > 1.5;
-        if (jumped && !suppressedVideoState) publishVideoState(playing, current);
+        if (jumped && !session.suppressedState) publishVideoState(session, playing, current);
         else if (shared.author === videoAuthor && playing
-          && now - videoBroadcastAt >= VIDEO_SYNC_INTERVAL_MS) publishVideoProgress(current);
+          && now - session.broadcastAt >= VIDEO_SYNC_INTERVAL_MS) publishVideoProgress(session, current);
         else if (shared.author !== videoAuthor && playing
           && Math.abs(current - videoPosition(shared)) > 2.5) {
-          videoPlayer.seekTo(videoPosition(shared), true);
+          session.player.seekTo(videoPosition(shared), true);
         }
-        lastVideoSample = { position: current, at: now, playing };
+        session.lastSample = { position: current, at: now, playing };
       }
     }
     if (grabbedItem && items.get(grabbedItem.id) === grabbedItem) {
@@ -1393,7 +1387,9 @@ export function createWorldItemSystem({ scene, cssScene, camera, canvas, getConn
         lastPositionBroadcast = now;
       }
     }
-    if (videoItemId !== null) updateVideoSurface(items.get(videoItemId));
+    for (const session of videoSessions.values()) {
+      updateVideoSurface(session, items.get(session.itemId));
+    }
     for (const item of items.values()) {
       if (!item.tether) continue;
       item.outline.visible = Boolean(item.heldBy);
@@ -1428,8 +1424,6 @@ export function createWorldItemSystem({ scene, cssScene, camera, canvas, getConn
   document.addEventListener('keydown', onKeyDown);
   document.addEventListener('keyup', onKeyUp);
   document.addEventListener('keydown', onVideoKeyDown);
-  videoReturnButton.addEventListener('click', () => leaveVideoInteraction(true));
-  videoCloseButton.addEventListener('click', () => closeVideo());
   window.addEventListener('blur', releaseGrab);
 
   return {
